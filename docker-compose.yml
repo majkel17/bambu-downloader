@@ -6,11 +6,12 @@ services:
     restart: unless-stopped
     ports:
       - "8080:8080"
-    # keep-id: your host uid appears inside the container, so the bind-mounted
-    # downloads/ and data/ are writable under rootless podman. Without it you
-    # get "attempt to write a readonly database". (Docker users: remove this
-    # line — 'keep-id' is podman-specific.)
-    userns_mode: keep-id
+    # Podman (rootless) users: uncomment the line below so your host uid
+    # appears inside the container and the bind-mounted downloads/ and data/
+    # are writable. Without it you get "attempt to write a readonly database".
+    # Docker users: leave this commented out and instead chown the host dirs
+    # to 1000:1000 (the container's uid) — see README.
+    # userns_mode: keep-id
     volumes:
       # Models land here on the host — point at your printer's sync folder if you like
       - ./downloads:/app/downloads:Z
