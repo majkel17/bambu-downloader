@@ -170,6 +170,16 @@ Details:
   500 MB; 0 disables) to avoid truncated writes on a full volume.
 - Filenames come from the API's `name` hint, the response's
   `Content-Disposition`, or the URL — sanitized through `_safe_filename`.
+  The profile-download `name` carries no extension, so the real one is
+  detected from the content (`_detect_extension`: 3MF = ZIP with a `3D/*.model`
+  part; also zip/stl/step) and appended. A name already taken by another
+  plate gets `-<profileId>` instead of being overwritten. Files saved before
+  this fix are renamed once at boot (`fix_file_extensions`, meta flag
+  `file_ext_migrated`).
+- Concurrency: `download_model` takes a per-design lock and re-checks the
+  library under it, and `sync_collection` refuses to run a collection that
+  is already syncing (scheduled and manual syncs share `_syncing`) — so a
+  "Sync now" racing the scheduler no longer downloads everything twice.
 - `delete_files=true` unfollows sweep model files, `cover.webp` and
   now-empty folders, but every path is resolved and must be
   `is_relative_to` the downloads root before it is touched.

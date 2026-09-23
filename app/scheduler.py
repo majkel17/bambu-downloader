@@ -92,8 +92,8 @@ class SyncScheduler:
                     cid = coll["collection_id"]
                     if not self._running:
                         break
-                    if cid in self.active:
-                        continue
+                    if cid in self.active or self.manager.is_syncing(cid):
+                        continue  # e.g. a manual "Sync now" is running
                     self.active[cid] = "syncing"
                     try:
                         await self.manager.sync_collection(cid)
@@ -183,7 +183,7 @@ def trigger_sync(manager: DownloadManager, collection_id: int) -> bool:
     scheduler's stop() can cancel them during graceful shutdown.
     """
     existing = _manual_tasks.get(collection_id)
-    if existing and not existing.done():
+    if (existing and not existing.done()) or manager.is_syncing(collection_id):
         return False
 
     async def run() -> None:

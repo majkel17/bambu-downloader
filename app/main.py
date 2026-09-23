@@ -101,6 +101,8 @@ async def lifespan(app: FastAPI):
     manager = DownloadManager(database)
     scheduler = SyncScheduler(database, manager)
     routes.init(database, manager, scheduler)
+    # Before the scheduler starts: no download may race the rename pass.
+    await asyncio.to_thread(manager.fix_file_extensions)
     scheduler.start()
     # Fetch missing metadata (cover, creator) for pre-existing models in
     # the background — must not block startup.

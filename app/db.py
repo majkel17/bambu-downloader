@@ -282,6 +282,7 @@ class Database:
                    status, error, created_at, updated_at)
                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(design_id, COALESCE(profile_id, -1)) DO UPDATE SET
+                     filename=excluded.filename,
                      file_path=excluded.file_path, file_size=excluded.file_size,
                      status=excluded.status, error=excluded.error,
                      cover_url=COALESCE(excluded.cover_url, models.cover_url),
@@ -308,6 +309,30 @@ class Database:
                 ),
             )
             return cur.lastrowid or 0
+
+    def get_model(self, model_row_id: int) -> dict[str, Any] | None:
+        """Fetch one model row by its primary key."""
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM models WHERE id = ?", (model_row_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def model_files(self) -> list[dict[str, Any]]:
+        """(id, filename, file_path) of every model row — for file migrations."""
+        with self.connect() as conn:
+            return [
+                dict(r)
+                for r in conn.execute("SELECT id, filename, file_path FROM models")
+            ]
+
+    def set_model_file(self, model_row_id: int, filename: str, file_path: str) -> None:
+        """Point a model row at a renamed file."""
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE models SET filename = ?, file_path = ?, updated_at = ? WHERE id = ?",
+                (filename, file_path, utcnow(), model_row_id),
+            )
 
     def update_model_status(
         self, model_row_id: int, status: str, error: str | None = None

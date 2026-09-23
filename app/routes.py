@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from .config import settings
@@ -345,6 +346,36 @@ async def models(
             collection_id=collection_id, no_collection=no_collection, label=label
         ),
     }
+
+
+# Media types for the file endpoint; anything else is served as a generic blob.
+_MEDIA_TYPES = {
+    ".3mf": "model/3mf",
+    ".stl": "model/stl",
+    ".step": "model/step",
+    ".zip": "application/zip",
+}
+
+
+@router.get("/models/{model_id}/file")
+async def model_file(model_id: int) -> FileResponse:
+    """Download a stored model file as an attachment.
+
+    Only files inside the downloads directory are served (the DB path is
+    resolved and checked), so a tampered row can't expose the host fs.
+    """
+    row = db.get_model(model_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Model not found")
+    root = Path(settings.download_dir).resolve()
+    path = Path(row["file_path"]).resolve()
+    if not path.is_relative_to(root) or not path.is_file():
+        raise HTTPException(status_code=404, detail="File is missing on disk")
+    return FileResponse(
+        path,
+        filename=path.name,
+        media_type=_MEDIA_TYPES.get(path.suffix.lower(), "application/octet-stream"),
+    )
 
 
 @router.get("/model-labels")
