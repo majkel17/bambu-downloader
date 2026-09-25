@@ -7,6 +7,9 @@ import logging
 import re
 import shutil
 import time
+import zipfile
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -126,6 +129,39 @@ class DownloadManager:
         # Download queue visibility for the UI: {design_id: 'queued'|'active'}
         # (plus in-flight title for the Activity tab). Pruned in finally.
         self.downloads: dict[int, dict[str, Any]] = {}
+        # Per-design download locks: {design_id: (lock, users)}.
+        self._design_locks: dict[int, tuple[asyncio.Lock, int]] = {}
+        # Collections with a sync in flight — shared by the scheduler and
+        # manual "Sync now" so the same collection never syncs twice at once.
+        self._syncing: set[int] = set()
+
+    def _have(self, design_id: int, profile_id: int | None) -> bool:
+        """Dedup check: exact (design_id, profile_id) pair when the URL pins
+        a plate, otherwise design-level — ANY plate already downloaded
+        counts, because we'd resolve to (and re-store) the same default
+        plate anyway."""
+        if profile_id is None:
+            return self.db.model_exists_any(design_id)
+        return self.db.model_exists(design_id, profile_id)
+
+    @asynccontextmanager
+    async def _design_lock(self, design_id: int) -> AsyncIterator[None]:
+        """Hold the lock for one design; dropped from the map when unused."""
+        lock, users = self._design_locks.get(design_id, (asyncio.Lock(), 0))
+        self._design_locks[design_id] = (lock, users + 1)
+        try:
+            async with lock:
+                yield
+        finally:
+            lock, users = self._design_locks[design_id]
+            if users <= 1:
+                del self._design_locks[design_id]
+            else:
+                self._design_locks[design_id] = (lock, users - 1)
+
+    def is_syncing(self, collection_id: int) -> bool:
+        """True while a sync of this collection runs (scheduled or manual)."""
+        return collection_id in self._syncing
 
     def queue_status(self) -> list[dict[str, Any]]:
         """Snapshot of in-flight/queued downloads for /api/status."""
@@ -186,6 +222,40 @@ class DownloadManager:
         finally:
             await release_client(client)
         logger.info("Metadata backfill done")
+
+    def fix_file_extensions(self) -> int:
+        """One-time migration: give extension-less downloads their real
+        extension (see _detect_extension) and repoint the DB rows.
+
+        Local-only (no network), idempotent; the meta flag is set only after
+        a pass without errors so a failed rename is retried next boot.
+        Returns the number of files renamed.
+        """
+        if self.db.get_meta("file_ext_migrated") == "1":
+            return 0
+        renamed = 0
+        failed = False
+        for row in self.db.model_files():
+            path = Path(row["file_path"])
+            if not path.is_file():
+                continue
+            new_name = _with_extension(path.name, _detect_extension(path))
+            if new_name == path.name:
+                continue
+            dest = _unique_path(path.with_name(new_name), row["id"])
+            try:
+                path.rename(dest)
+            except OSError as e:
+                logger.warning("could not rename %s: %s", path, e)
+                failed = True
+                continue
+            self.db.set_model_file(row["id"], dest.name, str(dest))
+            renamed += 1
+        if not failed:
+            self.db.set_meta("file_ext_migrated", "1")
+        if renamed:
+            logger.info("Added missing extensions to %d downloaded files", renamed)
+        return renamed
 
     def _client(self) -> MakerWorldClient:
         """Return the pooled API client for the stored token + region.
@@ -304,24 +374,19 @@ class DownloadManager:
         """
         design_id, profile_id = parse_model_url(url)
 
-        # Dedup: exact (design_id, profile_id) pair when the URL pins a
-        # plate, otherwise design-level — ANY plate already downloaded
-        # counts, because we'd resolve to (and re-store) the same default
-        # plate anyway.
-        if (
-            self.db.model_exists_any(design_id)
-            if profile_id is None
-            else self.db.model_exists(design_id, profile_id)
-        ):
-            return {
-                "status": "exists",
-                "design_id": design_id,
-                "profile_id": profile_id,
-            }
+        exists = {"status": "exists", "design_id": design_id, "profile_id": profile_id}
+        if self._have(design_id, profile_id):
+            return exists
 
         self.downloads[design_id] = {"state": "queued"}
         try:
-            async with self._sem:
+            # The per-design lock serializes concurrent requests for the same
+            # design (a manual sync racing the scheduler, a model in two
+            # followed collections); the re-check under it lets the loser
+            # see the winner's row instead of downloading a second copy.
+            async with self._design_lock(design_id), self._sem:
+                if self._have(design_id, profile_id):
+                    return exists
                 self.downloads[design_id] = {"state": "active"}
                 client = self._client()
                 try:
@@ -430,8 +495,17 @@ class DownloadManager:
                         size, remote_name = await client.download_file(
                             download_url, tmp
                         )
-                        final_name = filename_hint or remote_name or f"{design_id}.3mf"
-                        dest = dest_dir / _safe_filename(final_name)
+                        final_name = _with_extension(
+                            _safe_filename(
+                                filename_hint or remote_name or str(design_id)
+                            ),
+                            _detect_extension(tmp),
+                        )
+                        # Another plate of this design may already own the
+                        # name (manifests can reuse titles) — never clobber it.
+                        dest = _unique_path(
+                            dest_dir / final_name, inst_profile_id or design_id
+                        )
                         tmp.replace(dest)
                     finally:
                         # Remove the partial file if the download failed midway.
@@ -495,6 +569,21 @@ class DownloadManager:
             self.downloads.pop(design_id, None)
 
     async def sync_collection(self, collection_id: int) -> dict[str, Any]:
+        """Sync one collection unless a sync of it is already running.
+
+        The scheduler and manual "Sync now" both come through here, so a
+        second concurrent request returns status 'already-running' (nothing
+        recorded, no event) instead of racing the first one model by model.
+        """
+        if collection_id in self._syncing:
+            return {"new": 0, "total": 0, "errors": [], "status": "already-running"}
+        self._syncing.add(collection_id)
+        try:
+            return await self._sync_collection(collection_id)
+        finally:
+            self._syncing.discard(collection_id)
+
+    async def _sync_collection(self, collection_id: int) -> dict[str, Any]:
         """Download all new models from a collection; returns a summary dict.
 
         Already-downloaded designs are skipped (dedup by design_id), a
@@ -689,3 +778,46 @@ def _safe_filename(name: str) -> str:
     if not name or name == "model_":
         name = "model.3mf"
     return name[:150]
+
+
+def _detect_extension(path: Path) -> str:
+    """Identify a downloaded file by its content; returns e.g. ".3mf" or "".
+
+    Bambu's profile-download manifest names files after the plate/profile
+    title WITHOUT an extension, so the name can't be trusted. 3MF is an
+    OPC (ZIP) package — the same container as .docx, which is why `file`
+    calls it "Microsoft OOXML" — recognized by its 3D/ model part.
+    """
+    try:
+        with open(path, "rb") as f:
+            head = f.read(512)
+    except OSError:
+        return ""
+    if head.startswith(b"PK\x03\x04"):
+        try:
+            with zipfile.ZipFile(path) as zf:
+                names = {n.lower() for n in zf.namelist()}
+        except (zipfile.BadZipFile, OSError):
+            return ""
+        if any(n.startswith("3d/") and n.endswith(".model") for n in names):
+            return ".3mf"
+        return ".zip"
+    if head.lstrip().lower().startswith(b"solid"):
+        return ".stl"
+    if head.startswith(b"ISO-10303-21"):
+        return ".step"
+    return ""
+
+
+def _with_extension(name: str, ext: str) -> str:
+    """Append ext to a (sanitized) name unless it already ends with it."""
+    if not ext or name.lower().endswith(ext):
+        return name
+    return name[: 150 - len(ext)] + ext
+
+
+def _unique_path(path: Path, tag: str | int) -> Path:
+    """Return path, or path with -tag before the suffix if it's taken."""
+    if not path.exists():
+        return path
+    return path.with_name(f"{path.stem}-{tag}{path.suffix}")

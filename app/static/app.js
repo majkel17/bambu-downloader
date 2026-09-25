@@ -33,6 +33,7 @@ function wireEvents() {
   // Delegated clicks for lists rendered as innerHTML (survive re-renders).
   for (const [containerId, names] of [
     ['labelChips', ['set-lib-filter']],
+    ['modelGrid', ['download-file']],
     ['mineList', ['follow-mine']],
     ['collList', ['sync-now', 'coll-toggle', 'coll-remove']],
   ]) {
@@ -70,6 +71,7 @@ function handleAction(action, el) {
     'lib-clear': () => { document.getElementById('libSearch').value = ''; applyLibSearch(); },
     'load-more': () => loadMoreModels(),
     'set-lib-filter': () => setLibFilter(el.dataset.label),
+    'download-file': () => downloadFile(el.dataset.id, el.dataset.name, el),
     'add-collection': () => addCollection(),
     'refresh-mine': () => refreshMyCollections(),
     'follow-mine': () => followMine(el.dataset.cid, el.dataset.slug),
@@ -267,9 +269,43 @@ function modelCard(m) {
       ${origin}
     </div>
     <div class="meta actions">
+      <button class="ghost" data-action="download-file" data-id="${m.id}" data-name="${esc(m.filename)}">⬇ Download</button>
       <a class="mw-link" href="${esc(mwUrl)}" target="_blank" rel="noopener noreferrer">↗ MakerWorld</a>
     </div>
   </div>`;
+}
+
+// Save a stored model file to the user's device. Without an API key a plain
+// link streams straight to disk; with one, the X-API-Key header can't ride
+// on a link, so the file is fetched into a blob first.
+async function downloadFile(id, name, btn) {
+  const url = `/api/models/${id}/file`;
+  const save = (href) => {
+    const a = document.createElement('a');
+    a.href = href;
+    a.download = name || '';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+  const key = getApiKey();
+  if (!key) { save(url); return; }
+  btn.disabled = true;
+  try {
+    const res = await fetch(url, { headers: { 'X-API-Key': key } });
+    if (!res.ok) {
+      let detail = `HTTP ${res.status}`;
+      try { detail = (await res.json()).detail || detail; } catch (e) { /* not JSON */ }
+      throw new Error(detail);
+    }
+    const blobUrl = URL.createObjectURL(await res.blob());
+    save(blobUrl);
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+  } catch (e) {
+    toast(e.message, 'err');
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // Client-side library search: filters the cards that are already rendered
