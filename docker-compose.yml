@@ -5,7 +5,7 @@ services:
     container_name: bambu-downloader
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "8008:8080"
     # Podman (rootless) users: uncomment the line below so your host uid
     # appears inside the container and the bind-mounted downloads/ and data/
     # are writable. Without it you get "attempt to write a readonly database".
