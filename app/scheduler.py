@@ -29,6 +29,8 @@ class SyncScheduler:
         self.active: dict[int, str] = {}
         # monotonic deadline for the next automatic "my collections" refresh.
         self._next_mine_refresh = 0.0
+        # monotonic deadline for the next activity-log prune (hourly).
+        self._next_prune = 0.0
 
     def start(self) -> None:
         """Launch the polling loop (a no-op if it's already running)."""
@@ -82,6 +84,9 @@ class SyncScheduler:
             self._next_mine_refresh = 0.0
         while self._running:
             try:
+                if time.monotonic() >= self._next_prune:
+                    self._prune_events()
+                    self._next_prune = time.monotonic() + 3600
                 if time.monotonic() >= self._next_mine_refresh:
                     await self._refresh_my_collections()
                     self._next_mine_refresh = (
@@ -137,6 +142,19 @@ class SyncScheduler:
                 logger.exception("Scheduler iteration failed")
             # Poll interval is configurable; a small floor avoids busy-looping.
             await asyncio.sleep(settings.scheduler_interval_seconds)
+
+    def _prune_events(self) -> None:
+        """Apply the activity-log retention (BND_EVENT_RETENTION_DAYS /
+        BND_EVENT_MAX_ROWS). Never disturbs the loop over a DB hiccup."""
+        try:
+            deleted = self.db.prune_events(
+                settings.event_retention_days, settings.event_max_rows, time.time()
+            )
+        except Exception:
+            logger.exception("Activity-log prune failed")
+            return
+        if deleted:
+            logger.info("Pruned %d old activity-log entries", deleted)
 
     async def _refresh_my_collections(self) -> None:
         """Re-fetch the signed-in user's collection listing into the cache.

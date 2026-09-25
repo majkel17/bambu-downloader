@@ -86,6 +86,17 @@ class Settings:
         # request must carry it in the X-API-Key header — protects the stored
         # Bambu token from anyone else on the network. Empty = open (LAN trust).
         self.api_key: str | None = _env("BND_API_KEY", "").strip() or None
+        # Optional second key that only opens read-only (GET) endpoints —
+        # for dashboards like Home Assistant, so the full key (which can
+        # sign in, download and unfollow) never sits in their config.
+        # Only meaningful together with BND_API_KEY.
+        self.read_api_key: str | None = _env("BND_READ_API_KEY", "").strip() or None
+        # Activity-log retention: rows older than this many days, and rows
+        # beyond the newest N, are pruned hourly. 0 disables either limit.
+        self.event_retention_days: int = max(
+            0, int(_env("BND_EVENT_RETENTION_DAYS", "30"))
+        )
+        self.event_max_rows: int = max(0, int(_env("BND_EVENT_MAX_ROWS", "5000")))
 
 
 settings = Settings()

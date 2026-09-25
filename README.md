@@ -88,6 +88,7 @@ Environment variables (all optional — defaults shown):
 | Variable | Default | Purpose |
 |---|---|---|
 | `BND_API_KEY` | *(unset)* | When set, every `/api/*` request must carry `X-API-Key: <value>` — protects the token from other LAN users |
+| `BND_READ_API_KEY` | *(unset)* | Optional second key that only opens read-only (GET) endpoints — give this one to Home Assistant & co. Needs `BND_API_KEY` to be set |
 | `BND_DOWNLOAD_DIR` | `/app/downloads` | Where models are saved |
 | `BND_DATA_DIR` | `/app/data` | State dir (DB path derives from this unless overridden) |
 | `BND_DB_PATH` | `/app/data/bambu_downloader.db` | SQLite state |
@@ -95,7 +96,39 @@ Environment variables (all optional — defaults shown):
 | `BND_SCHEDULER_INTERVAL_SECONDS` | `300` | How often the scheduler checks for due collections |
 | `BND_SYNC_INTERVAL_MINUTES` | `360` | Default sync interval for newly added collections |
 | `BND_DOWNLOAD_DELAY_SECONDS` | `3` | Pause between downloads inside a sync (anti rate-limit) |
+| `BND_EVENT_RETENTION_DAYS` | `30` | Activity-log entries older than this are pruned (hourly). `0` = keep forever |
+| `BND_EVENT_MAX_ROWS` | `5000` | …and only the newest N are kept (~1 MB of SQLite). `0` = no cap |
 | `BND_MAX_DOWNLOAD_ATTEMPTS` | `3` | Syncs skip a model after this many failures caused by the model itself (404 / private / no download URL); network, CAPTCHA and sign-in problems don't count. Skipped models are listed in Collections with a Retry button. `0` = retry forever |
+
+## Home Assistant
+
+`GET /api/collections/stats` lists every followed collection;
+`GET /api/collections/<id>/stats` returns one as a flat object:
+
+```json
+{"collection_id": 12345, "title": "Favorites", "enabled": true, "syncing": false,
+ "total": 273, "present": 268, "skipped": 3, "missing": 2,
+ "last_sync_at": "2026-09-25T21:30:00+00:00", "last_sync_status": "ok", "last_sync_new": 4}
+```
+
+`total`/`present`/`missing` are as of the collection's last sync (`null` before
+the first one). With `BND_API_KEY` set, give HA the read-only `BND_READ_API_KEY`
+— it can read everything but can't sign in, download or unfollow.
+
+```yaml
+# configuration.yaml — one REST sensor per collection
+rest:
+  - resource: http://<host>:8080/api/collections/12345/stats
+    headers:
+      X-API-Key: !secret bambu_downloader_read_key   # omit without BND_API_KEY
+    scan_interval: 300
+    sensor:
+      - name: "MakerWorld Favorites"
+        unique_id: bambu_downloader_12345
+        value_template: "{{ value_json.present }}"
+        unit_of_measurement: models
+        json_attributes: [total, missing, skipped, syncing, last_sync_at, last_sync_status]
+```
 
 ## How it works (reverse-engineered endpoints)
 

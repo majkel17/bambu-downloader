@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from . import routes
 from .config import settings
 from .db import Database
-from .downloader import DownloadManager
+from .downloader import DownloadManager, set_event_store
 from .makerworld import (
     MakerWorldError,
     get_client,
@@ -101,6 +101,7 @@ async def lifespan(app: FastAPI):
     manager = DownloadManager(database)
     scheduler = SyncScheduler(database, manager)
     routes.init(database, manager, scheduler)
+    set_event_store(database)  # Activity log survives restarts from here on
     # Before the scheduler starts: no download may race the rename pass.
     await asyncio.to_thread(manager.fix_file_extensions)
     scheduler.start()
@@ -124,6 +125,7 @@ async def lifespan(app: FastAPI):
         # Release every pooled httpx connection so sockets don't outlive
         # the loop and trip 'Event loop is closed' warnings on shutdown.
         await invalidate_shared_clients()
+        set_event_store(None)
         logger.info("Shutdown complete")
 
 
