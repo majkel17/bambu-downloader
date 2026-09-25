@@ -71,6 +71,13 @@ class Settings:
         # space than this (MB). 0 disables the check. Guards against
         # truncated .3mf files when the disk fills mid-write.
         self.min_free_mb: int = max(0, int(_env("BND_MIN_FREE_MB", "500")))
+        # Syncs stop retrying a model after this many failed attempts where
+        # the model itself was the problem (404, 403, no download URL) —
+        # removed/censored designs otherwise earn a request (and anti-abuse
+        # score) on every sync forever. 0 = retry forever.
+        self.max_download_attempts: int = max(
+            0, int(_env("BND_MAX_DOWNLOAD_ATTEMPTS", "3"))
+        )
         # Copy the SQLite database to data/backup/ on boot (before the
         # scheduler touches it). Simple belt-and-suspenders for a NAS-ish
         # setup; keep the most recent copy.

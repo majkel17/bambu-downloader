@@ -555,6 +555,22 @@ async def delete_collection(
     return {"ok": True, "deleted_files": deleted_files, "failed": failed}
 
 
+@router.get("/skipped-models")
+async def skipped_models() -> dict[str, Any]:
+    """Designs syncs no longer try (BND_MAX_DOWNLOAD_ATTEMPTS model-caused
+    failures: removed, private, no download URL)."""
+    limit = settings.max_download_attempts
+    return {"max_attempts": limit, "models": db.skipped_models(limit)}
+
+
+@router.post("/skipped-models/{design_id}/retry")
+async def retry_skipped_model(design_id: int) -> dict[str, Any]:
+    """Reset a design's failure count so the next sync tries it again."""
+    if not db.clear_failure(design_id):
+        raise HTTPException(status_code=404, detail="Model is not skipped")
+    return {"ok": True}
+
+
 @router.post("/collections/{collection_id}/sync")
 async def sync_collection_now(collection_id: int) -> dict[str, Any]:
     """Trigger a background sync of one collection right now.

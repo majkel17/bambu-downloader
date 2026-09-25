@@ -25,7 +25,7 @@ function wireEvents() {
   }
   // Library search box: filter on every keystroke; Clear button resets it.
   const libSearch = document.getElementById('libSearch');
-  if (libSearch) libSearch.addEventListener('input', applyLibSearch);
+  if (libSearch) libSearch.addEventListener('input', () => { applyLibSearch(); updateLibraryRoute(); });
   // Static buttons.
   for (const el of document.querySelectorAll('[data-action]')) {
     el.addEventListener('click', (ev) => handleAction(el.dataset.action, ev.target));
@@ -34,6 +34,7 @@ function wireEvents() {
   for (const [containerId, names] of [
     ['labelChips', ['set-lib-filter']],
     ['modelGrid', ['download-file']],
+    ['skippedList', ['retry-skipped']],
     ['mineList', ['follow-mine']],
     ['collList', ['sync-now', 'coll-toggle', 'coll-remove']],
   ]) {
@@ -66,9 +67,9 @@ function wireEvents() {
 // and delegated list rows; ev is only needed for focus restoration.
 function handleAction(action, el) {
   const actions = {
-    'tab': () => showTab(el.dataset.tab),
+    'tab': () => navigate(el.dataset.tab),
     'download': () => doDownload(),
-    'lib-clear': () => { document.getElementById('libSearch').value = ''; applyLibSearch(); },
+    'lib-clear': () => { document.getElementById('libSearch').value = ''; applyLibSearch(); updateLibraryRoute(); },
     'load-more': () => loadMoreModels(),
     'set-lib-filter': () => setLibFilter(el.dataset.label),
     'download-file': () => downloadFile(el.dataset.id, el.dataset.name, el),
@@ -76,6 +77,7 @@ function handleAction(action, el) {
     'refresh-mine': () => refreshMyCollections(),
     'follow-mine': () => followMine(el.dataset.cid, el.dataset.slug),
     'sync-now': () => syncNow(el.dataset.cid),
+    'retry-skipped': () => retrySkipped(el.dataset.did),
     'coll-toggle': () => toggleColl(el.dataset.cid, el.dataset.enable === 'true'),
     'coll-remove': () => removeColl(el.dataset.cid),
     'modal-cancel': () => closeRemoveModal(),
@@ -140,6 +142,43 @@ function fmtBytes(n) {
   return n + ' B';
 }
 
+// ------------------------------------------------------------------ routing
+// The active tab (and the library's filter/search) live in the URL hash —
+// #library?label=…&q=… — so a refresh or a bookmark lands on the same view.
+// Tab clicks add a history entry (back/forward switch tabs); filter and
+// search updates replace it, so typing doesn't flood the history.
+const TABS = ['download', 'library', 'collections', 'activity', 'settings'];
+
+function parseRoute() {
+  const [name, query] = location.hash.slice(1).split('?');
+  return { tab: TABS.includes(name) ? name : 'download', params: new URLSearchParams(query || '') };
+}
+
+function navigate(tab) {
+  if (location.hash.slice(1).split('?')[0] === tab) showTab(tab);
+  else location.hash = tab;  // -> hashchange -> applyRoute
+}
+
+function applyRoute() {
+  const { tab, params } = parseRoute();
+  if (tab === 'library') {
+    libFilter.label = params.get('label');
+    libShown = LIB_PAGE;
+    document.getElementById('libSearch').value = params.get('q') || '';
+  }
+  showTab(tab);
+}
+
+// Mirror the library filter/search into the hash without a history entry.
+function updateLibraryRoute() {
+  const params = new URLSearchParams();
+  if (libFilter.label) params.set('label', libFilter.label);
+  const q = document.getElementById('libSearch').value.trim();
+  if (q) params.set('q', q);
+  const qs = params.toString();
+  history.replaceState(null, '', '#library' + (qs ? '?' + qs : ''));
+}
+
 function showTab(name) {
   for (const tab of document.querySelectorAll('.tab')) tab.hidden = true;
   document.getElementById('tab-' + name).hidden = false;
@@ -149,7 +188,7 @@ function showTab(name) {
   if (name === 'activity') startEventPolling();
   else stopEventPolling();
   if (name === 'library') { loadModels(); loadLabels(); }
-  if (name === 'collections') { startMinePolling(); loadCollections(); }
+  if (name === 'collections') { startMinePolling(); loadCollections(); loadSkipped(); }
   else stopMinePolling();
 }
 
@@ -238,6 +277,7 @@ async function loadLabels() {
 function setLibFilter(label) {
   libFilter.label = label === 'All' ? null : label;
   libShown = LIB_PAGE;  // new filter -> back to the first page
+  updateLibraryRoute();
   loadModels();
   loadLabels();
 }
@@ -558,6 +598,35 @@ async function doRemoveColl(deleteFiles) {
   } catch (e) { toast(e.message, 'err'); }
 }
 
+// Models syncs gave up on (BND_MAX_DOWNLOAD_ATTEMPTS model-caused failures).
+async function loadSkipped() {
+  try {
+    const r = await api('/api/skipped-models');
+    const card = document.getElementById('skippedCard');
+    card.hidden = r.models.length === 0;
+    document.getElementById('skippedCount').textContent = r.models.length || '';
+    document.getElementById('skippedList').innerHTML = r.models.map(m => {
+      const mw = `https://makerworld.com/en/models/${m.design_id}`;
+      const coll = m.collection_title ? ` · 🗂 ${esc(m.collection_title)}` : '';
+      return `
+      <div class="coll-item">
+        <a class="title" href="${esc(mw)}" target="_blank" rel="noopener noreferrer">Model #${m.design_id}</a>
+        <span class="muted">${m.attempts} attempts · last ${new Date(m.last_attempt_at).toLocaleString()}${coll}</span>
+        <span class="muted" style="flex-basis:100%">${esc(m.last_error || '')}</span>
+        <button class="ghost" data-action="retry-skipped" data-did="${m.design_id}">Retry on next sync</button>
+      </div>`;
+    }).join('');
+  } catch (e) { console.error(e); }
+}
+
+async function retrySkipped(did) {
+  try {
+    await api(`/api/skipped-models/${did}/retry`, { method: 'POST' });
+    toast('Will retry on the next sync', 'ok');
+    loadSkipped();
+  } catch (e) { toast(e.message, 'err'); }
+}
+
 async function syncNow(cid) {
   try {
     const r = await api(`/api/collections/${cid}/sync`, { method: 'POST' });
@@ -583,7 +652,8 @@ async function loadEvents() {
 
 function startEventPolling() {
   loadEvents();
-  eventTimer = setInterval(loadEvents, 4000);
+  // One timer only: re-entering the tab used to stack another interval.
+  if (!eventTimer) eventTimer = setInterval(loadEvents, 4000);
 }
 function stopEventPolling() {
   if (eventTimer) { clearInterval(eventTimer); eventTimer = null; }
@@ -691,6 +761,7 @@ async function loadAll() {
 }
 
 wireEvents();
+window.addEventListener('hashchange', applyRoute);
 loadAll();
 setInterval(loadStatus, 30000);
 
@@ -704,7 +775,11 @@ if ('serviceWorker' in navigator) {
 const params = new URLSearchParams(location.search);
 const sharedUrl = params.get('url');
 if (sharedUrl) {
+  // Drop ?url= so a refresh doesn't re-submit the shared link.
+  history.replaceState(null, '', '/#download');
   showTab('download');
   document.getElementById('modelUrl').value = sharedUrl;
   doDownload();
+} else {
+  applyRoute();
 }

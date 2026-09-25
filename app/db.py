@@ -62,6 +62,18 @@ CREATE TABLE IF NOT EXISTS collections (
 -- is a cache only: rows are never deleted (a collection that vanishes on
 -- MakerWorld is marked hidden instead) and following a collection still
 -- writes to `collections`.
+-- Per-design failure counter for collection syncs. Only failures caused by
+-- the model itself (removed, private, no download URL) are counted; a row
+-- reaching BND_MAX_DOWNLOAD_ATTEMPTS makes syncs skip the design. Cleared
+-- when the design downloads successfully or the user hits Retry.
+CREATE TABLE IF NOT EXISTS download_failures (
+    design_id INTEGER PRIMARY KEY,
+    collection_id INTEGER,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    last_attempt_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS remote_collections (
     collection_id INTEGER PRIMARY KEY,
     title TEXT,
@@ -333,6 +345,67 @@ class Database:
                 "UPDATE models SET filename = ?, file_path = ?, updated_at = ? WHERE id = ?",
                 (filename, file_path, utcnow(), model_row_id),
             )
+
+    # ---- download failures (skip after N attempts) ----
+    def record_failure(
+        self, design_id: int, collection_id: int | None, error: str
+    ) -> int:
+        """Count one failed attempt for a design; returns the new total."""
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO download_failures(design_id, collection_id, attempts,
+                       last_error, last_attempt_at)
+                   VALUES(?, ?, 1, ?, ?)
+                   ON CONFLICT(design_id) DO UPDATE SET
+                     attempts = attempts + 1,
+                     collection_id = COALESCE(excluded.collection_id, collection_id),
+                     last_error = excluded.last_error,
+                     last_attempt_at = excluded.last_attempt_at""",
+                (design_id, collection_id, error, utcnow()),
+            )
+            row = conn.execute(
+                "SELECT attempts FROM download_failures WHERE design_id = ?",
+                (design_id,),
+            ).fetchone()
+            return int(row["attempts"])
+
+    def clear_failure(self, design_id: int) -> bool:
+        """Forget a design's failures; True if there were any."""
+        with self.connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM download_failures WHERE design_id = ?", (design_id,)
+            )
+            return cur.rowcount > 0
+
+    def skipped_design_ids(self, max_attempts: int) -> set[int]:
+        """Designs syncs should skip (attempts >= max_attempts; 0 = none)."""
+        if max_attempts <= 0:
+            return set()
+        with self.connect() as conn:
+            return {
+                int(r["design_id"])
+                for r in conn.execute(
+                    "SELECT design_id FROM download_failures WHERE attempts >= ?",
+                    (max_attempts,),
+                )
+            }
+
+    def skipped_models(self, max_attempts: int) -> list[dict[str, Any]]:
+        """Skipped designs with their last error and collection title."""
+        if max_attempts <= 0:
+            return []
+        with self.connect() as conn:
+            return [
+                dict(r)
+                for r in conn.execute(
+                    """SELECT f.*, c.title AS collection_title
+                       FROM download_failures f
+                       LEFT JOIN collections c ON c.collection_id = f.collection_id
+                       WHERE f.attempts >= ?
+                       ORDER BY f.last_attempt_at DESC""",
+                    (max_attempts,),
+                )
+            ]
 
     def update_model_status(
         self, model_row_id: int, status: str, error: str | None = None

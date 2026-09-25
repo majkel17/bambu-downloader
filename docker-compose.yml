@@ -26,3 +26,6 @@ services:
       # - BND_DOWNLOAD_DELAY_SECONDS=3
       # How often the scheduler checks for due collections:
       # - BND_SCHEDULER_INTERVAL_SECONDS=300
+      # Stop retrying a model in syncs after this many failures caused by the
+      # model itself (removed / private / censored); 0 = retry forever:
+      # - BND_MAX_DOWNLOAD_ATTEMPTS=3

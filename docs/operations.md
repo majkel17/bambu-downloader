@@ -107,6 +107,7 @@ sensitive; the API-key gate exists because of this.
 | `GET /api/models`, `/api/model-labels`, `/api/events` | Library grid, origin-label filter bar, activity ring buffer |
 | `GET /api/models/{id}/file` | Download a stored model file (attachment; only paths inside the downloads root) |
 | `GET /api/collections`, `POST /api/collections`, `PATCH/DELETE /api/collections/{id}` | Follow / configure / unfollow (optional file deletion) |
+| `GET /api/skipped-models`, `POST /api/skipped-models/{design_id}/retry` | Designs syncs gave up on (`BND_MAX_DOWNLOAD_ATTEMPTS`) / reset one for the next sync |
 | `POST /api/collections/{id}/sync` | Manual sync now (background task; `{"started": false}` if that collection is already syncing, scheduled or manual) |
 | `GET /api/my-collections`, `POST /api/my-collections/refresh` | Own-collection cache + manual refresh (429 on captcha) |
 | `GET /api/shared-model` | PWA share-target URL validation |

@@ -145,6 +145,18 @@ A **cache only**, rewritten wholesale by `refresh_my_collections()` from the
   boot, so restarting a fresh container causes **zero** MakerWorld requests)
   or manually via `POST /api/my-collections/refresh`.
 
+### `download_failures` — give up on dead models
+
+One row per design that failed in a collection sync **because of the model
+itself**: `NotFoundError`, `ForbiddenError` or `ModelUnavailableError` (no
+download URL). Network errors, CAPTCHA, auth and disk space never count.
+
+- `attempts` is bumped per failed sync; at `BND_MAX_DOWNLOAD_ATTEMPTS`
+  (default 3, `0` = never skip) syncs skip the design and one Activity event
+  says so. In all-plates mode the design's remaining plates are skipped too.
+- Cleared on a successful download (a manual download by URL ignores the
+  skip) or via `POST /api/skipped-models/{design_id}/retry`.
+
 ---
 
 ## On-disk layout
