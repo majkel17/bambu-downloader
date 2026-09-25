@@ -19,6 +19,7 @@ from .makerworld import (
     AuthExpiredError,
     AuthRequiredError,
     CaptchaError,
+    ForbiddenError,
     MakerWorldClient,
     MakerWorldError,
     NotFoundError,
@@ -29,6 +30,17 @@ from .makerworld import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class ModelUnavailableError(MakerWorldError):
+    """MakerWorld has the design but won't hand out a file for it."""
+
+
+def _counts_against_model(e: MakerWorldError) -> bool:
+    """Whether a failure is the model's fault (removed, private, no file) and
+    so counts toward BND_MAX_DOWNLOAD_ATTEMPTS. Network trouble, CAPTCHA,
+    auth and disk space say nothing about the model and never count."""
+    return isinstance(e, NotFoundError | ForbiddenError | ModelUnavailableError)
 
 
 def _token_cache_reset() -> None:
@@ -472,11 +484,11 @@ class DownloadManager:
                         except CaptchaError:
                             raise
                         except MakerWorldError as e:
-                            raise MakerWorldError(
+                            raise ModelUnavailableError(
                                 f"Could not get a download URL — you are probably not signed in. ({e})"
                             ) from e
                     if not download_url:
-                        raise MakerWorldError(
+                        raise ModelUnavailableError(
                             "MakerWorld did not return a download URL for this model."
                         )
 
@@ -543,6 +555,7 @@ class DownloadManager:
                         collection_title=coll_title,
                         creator=str(creator) if creator else None,
                     )
+                    self.db.clear_failure(design_id)
                     origin = (
                         f" from “{coll_title}”" if coll_title else " (manual download)"
                     )
@@ -613,9 +626,14 @@ class DownloadManager:
         errors: list[str] = []
         attempted = 0
         aborted: str | None = None
+        skip = self.db.skipped_design_ids(settings.max_download_attempts)
+        skipped = 0
         for hit in designs:
             design_id = int(hit.get("id") or 0)
             if not design_id:
+                continue
+            if design_id in skip:
+                skipped += 1
                 continue
             if plates_mode == "all":
                 # Enumerate every plate; already-stored (design, plate) pairs
@@ -630,6 +648,7 @@ class DownloadManager:
                             "error",
                             f"Collection {collection_id}: model {design_id} instances failed — {e}",
                         )
+                        await self._count_failure(design_id, collection_id, e)
                         continue
                     plates = [
                         int(i.get("profileId") or 0) or int(i.get("id") or 0)
@@ -704,6 +723,8 @@ class DownloadManager:
                         "error",
                         f"Collection {collection_id}: model {design_id} failed — {e}",
                     )
+                    if await self._count_failure(design_id, collection_id, e):
+                        break  # now skipped: don't try its other plates
             if aborted:
                 break
 
@@ -712,15 +733,36 @@ class DownloadManager:
         await add_event(
             "sync",
             f"Synced “{title}”: {new_count} new, {len(designs)} total"
+            + (f", {skipped} skipped after repeated failures" if skipped else "")
             + (f" — stopped early ({aborted})" if aborted else ""),
             collection_id=collection_id,
         )
         return {
             "new": new_count,
+            "skipped": skipped,
             "total": len(designs),
             "errors": errors,
             "status": status,
         }
+
+    async def _count_failure(
+        self, design_id: int, collection_id: int, e: MakerWorldError
+    ) -> bool:
+        """Record a model-caused failure; True once the design hits the
+        attempt limit (logged once, when it crosses)."""
+        limit = settings.max_download_attempts
+        if not _counts_against_model(e):
+            return False
+        attempts = self.db.record_failure(design_id, collection_id, str(e))
+        if limit and attempts == limit:
+            await add_event(
+                "error",
+                f"Model {design_id}: skipped from now on after {attempts} failed "
+                "attempts (retry it from the Collections tab)",
+                design_id=design_id,
+                collection_id=collection_id,
+            )
+        return bool(limit) and attempts >= limit
 
     async def _design_instances(self, design_id: int) -> list[dict[str, Any]]:
         """Fetch a design's plate instances via a fresh (short-lived) client.

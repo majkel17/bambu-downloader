@@ -94,6 +94,8 @@ Environment variables (all optional — defaults shown):
 | `BND_PORT` | `8080` | Web UI port |
 | `BND_SCHEDULER_INTERVAL_SECONDS` | `300` | How often the scheduler checks for due collections |
 | `BND_SYNC_INTERVAL_MINUTES` | `360` | Default sync interval for newly added collections |
+| `BND_DOWNLOAD_DELAY_SECONDS` | `3` | Pause between downloads inside a sync (anti rate-limit) |
+| `BND_MAX_DOWNLOAD_ATTEMPTS` | `3` | Syncs skip a model after this many failures caused by the model itself (404 / private / no download URL); network, CAPTCHA and sign-in problems don't count. Skipped models are listed in Collections with a Retry button. `0` = retry forever |
 
 ## How it works (reverse-engineered endpoints)
 
