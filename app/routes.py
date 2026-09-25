@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -30,20 +30,33 @@ from .makerworld import (
 from .scheduler import SyncScheduler, trigger_sync
 
 
+def _key_matches(given: str | None, expected: str | None) -> bool:
+    """Constant-time key comparison (hmac.compare_digest: no timing leaks)."""
+    return bool(given and expected) and hmac.compare_digest(given, expected)
+
+
 async def require_api_key(
+    request: Request,
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
 ) -> None:
     """Gate every /api/* route behind the configured shared secret (if any).
 
-    Compares with hmac.compare_digest to avoid timing leaks. When no key is
+    BND_API_KEY opens everything. BND_READ_API_KEY (optional) opens only
+    GET/HEAD — status, stats, library, events — for dashboards that must
+    not be able to sign in, download or unfollow. When no BND_API_KEY is
     configured the app stays open — intended for a trusted LAN.
     """
     if not settings.api_key:
         return
-    if not x_api_key or not hmac.compare_digest(x_api_key, settings.api_key):
+    if _key_matches(x_api_key, settings.api_key):
+        return
+    if _key_matches(x_api_key, settings.read_api_key):
+        if request.method in ("GET", "HEAD"):
+            return
         raise HTTPException(
-            status_code=401, detail="Invalid or missing X-API-Key header"
+            status_code=403, detail="This API key is read-only (BND_READ_API_KEY)"
         )
+    raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key header")
 
 
 router = APIRouter(prefix="/api", dependencies=[Depends(require_api_key)])
@@ -328,11 +341,13 @@ async def models(
     label: str | None = None,
     limit: int = 200,
     offset: int = 0,
+    q: str | None = None,
 ) -> dict[str, Any]:
-    """List downloaded models, optionally filtered by origin.
+    """List downloaded models, optionally filtered by origin and search.
 
     Filters: collection_id (a followed collection), no_collection (manual
-    downloads / 'no collection'), label (exact snapshot title match).
+    downloads / 'no collection'), label (exact snapshot title match), q
+    (substring of title / creator / filename / label).
     """
     return {
         "models": db.list_models(
@@ -341,9 +356,10 @@ async def models(
             label=label,
             limit=limit,
             offset=offset,
+            q=q,
         ),
         "total": db.count_models(
-            collection_id=collection_id, no_collection=no_collection, label=label
+            collection_id=collection_id, no_collection=no_collection, label=label, q=q
         ),
     }
 
@@ -385,9 +401,9 @@ async def model_labels() -> list[dict[str, Any]]:
 
 
 @router.get("/events")
-async def events(limit: int = 50) -> dict[str, Any]:
-    """Recent activity-log events (in-memory ring buffer, newest first)."""
-    return {"events": recent_events(limit)}
+async def events(limit: int = 50, kind: str | None = None) -> dict[str, Any]:
+    """Recent activity-log events, newest first; kind = download/sync/error."""
+    return {"events": recent_events(min(max(limit, 1), 1000), kind)}
 
 
 # -------------------------------------------------------------- collections
@@ -553,6 +569,44 @@ async def delete_collection(
         db.delete_models(collection_id)
     db.delete_collection(collection_id)
     return {"ok": True, "deleted_files": deleted_files, "failed": failed}
+
+
+def _collection_stats() -> list[dict[str, Any]]:
+    """Per-collection progress rows with live sync state and 'missing'."""
+    out = []
+    for c in db.collection_stats(settings.max_download_attempts):
+        cid = c["collection_id"]
+        total, present = c["total"], c["present"]
+        out.append(
+            {
+                **c,
+                "enabled": bool(c["enabled"]),
+                "syncing": manager.is_syncing(cid) or cid in scheduler.active,
+                "missing": (
+                    max(0, total - present - c["skipped"])
+                    if total is not None and present is not None
+                    else None
+                ),
+            }
+        )
+    return out
+
+
+@router.get("/collections/stats")
+async def collections_stats() -> dict[str, Any]:
+    """Progress of every followed collection — for dashboards such as Home
+    Assistant (readable with BND_READ_API_KEY). total/present/missing are
+    as of each collection's last sync; null until it has synced once."""
+    return {"collections": _collection_stats()}
+
+
+@router.get("/collections/{collection_id}/stats")
+async def collection_stats(collection_id: int) -> dict[str, Any]:
+    """One collection's progress as a flat object (easy HA REST sensor)."""
+    for c in _collection_stats():
+        if c["collection_id"] == collection_id:
+            return c
+    raise HTTPException(status_code=404, detail="Collection not registered")
 
 
 @router.get("/skipped-models")

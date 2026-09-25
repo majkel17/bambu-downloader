@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import shutil
+import sqlite3
 import time
 import zipfile
 from collections.abc import AsyncIterator
@@ -58,26 +60,47 @@ def _token_cache_reset() -> None:
         pass
 
 
-# Progress events for the UI (recent activity log kept in memory).
+# Progress events for the UI's Activity tab. Persisted to SQLite once main.py
+# wires a store (set_event_store); the in-memory ring buffer is the fallback
+# before that (and in unit tests), and if a DB write ever fails.
 _events: list[dict[str, Any]] = []
 _events_lock = asyncio.Lock()
 _MAX_EVENTS = 200
+_event_store: Database | None = None
+
+
+def set_event_store(db: Database | None) -> None:
+    """Persist events to this database from now on (None = memory only)."""
+    global _event_store
+    _event_store = db
 
 
 async def add_event(kind: str, message: str, **extra: Any) -> None:
-    """Append an activity-log event for the UI (in-memory, capped ring buffer).
+    """Append an activity-log event for the UI.
 
     kind is 'download' / 'sync' / 'error'; extra kwargs become extra fields.
     """
+    ts = time.time()
+    if _event_store is not None:
+        try:
+            _event_store.add_event(
+                ts, kind, message, json.dumps(extra) if extra else None
+            )
+            return
+        except (sqlite3.Error, TypeError, ValueError) as e:
+            logger.warning("event not persisted (%s): %s", e, message)
     async with _events_lock:
-        _events.append({"ts": time.time(), "kind": kind, "message": message, **extra})
+        _events.append({"ts": ts, "kind": kind, "message": message, **extra})
         if len(_events) > _MAX_EVENTS:
             del _events[: len(_events) - _MAX_EVENTS]
 
 
-def recent_events(limit: int = 50) -> list[dict[str, Any]]:
-    """Return the most recent events, newest first."""
-    return list(reversed(_events[-limit:]))
+def recent_events(limit: int = 50, kind: str | None = None) -> list[dict[str, Any]]:
+    """Return the most recent events, newest first (optionally one kind)."""
+    if _event_store is not None:
+        return _event_store.recent_events(limit, kind)
+    events = [e for e in reversed(_events) if not kind or e["kind"] == kind]
+    return events[:limit]
 
 
 def _slugify(text: str) -> str:
@@ -729,7 +752,11 @@ class DownloadManager:
                 break
 
         status = aborted or ("ok" if not errors else f"partial ({len(errors)} errors)")
-        self.db.record_sync(collection_id, status, new_count)
+        design_ids = [int(h.get("id") or 0) for h in designs]
+        present = self.db.count_present([d for d in design_ids if d])
+        self.db.record_sync(
+            collection_id, status, new_count, total=len(designs), present=present
+        )
         await add_event(
             "sync",
             f"Synced “{title}”: {new_count} new, {len(designs)} total"

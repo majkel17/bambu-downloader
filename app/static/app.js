@@ -25,7 +25,19 @@ function wireEvents() {
   }
   // Library search box: filter on every keystroke; Clear button resets it.
   const libSearch = document.getElementById('libSearch');
-  if (libSearch) libSearch.addEventListener('input', () => { applyLibSearch(); updateLibraryRoute(); });
+  // Server-side search, debounced so a query is sent ~250 ms after typing stops.
+  let searchTimer = null;
+  if (libSearch) libSearch.addEventListener('input', () => {
+    updateLibraryRoute();
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => { libShown = LIB_PAGE; loadModels(); }, 250);
+  });
+  const evKind = document.getElementById('evKind');
+  if (evKind) evKind.addEventListener('change', () => {
+    activityKind = evKind.value;
+    history.replaceState(null, '', '#activity' + (activityKind ? '?kind=' + activityKind : ''));
+    loadEvents();
+  });
   // Static buttons.
   for (const el of document.querySelectorAll('[data-action]')) {
     el.addEventListener('click', (ev) => handleAction(el.dataset.action, ev.target));
@@ -69,7 +81,7 @@ function handleAction(action, el) {
   const actions = {
     'tab': () => navigate(el.dataset.tab),
     'download': () => doDownload(),
-    'lib-clear': () => { document.getElementById('libSearch').value = ''; applyLibSearch(); updateLibraryRoute(); },
+    'lib-clear': () => { document.getElementById('libSearch').value = ''; updateLibraryRoute(); libShown = LIB_PAGE; loadModels(); },
     'load-more': () => loadMoreModels(),
     'set-lib-filter': () => setLibFilter(el.dataset.label),
     'download-file': () => downloadFile(el.dataset.id, el.dataset.name, el),
@@ -132,7 +144,11 @@ function esc(s) {
 
 function fmtTime(ts) {
   const d = new Date(ts * 1000);
-  return d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'});
+  const time = d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'});
+  // The log now spans weeks: prefix the date for anything not from today.
+  return d.toDateString() === new Date().toDateString()
+    ? time
+    : d.toLocaleDateString([], {day: '2-digit', month: '2-digit'}) + ' ' + time;
 }
 
 function fmtBytes(n) {
@@ -165,6 +181,10 @@ function applyRoute() {
     libFilter.label = params.get('label');
     libShown = LIB_PAGE;
     document.getElementById('libSearch').value = params.get('q') || '';
+  }
+  if (tab === 'activity') {
+    activityKind = params.get('kind') || '';
+    document.getElementById('evKind').value = activityKind;
   }
   showTab(tab);
 }
@@ -292,11 +312,8 @@ function modelCard(m) {
     : `<span class="tag origin" title="Downloaded by URL, not via a collection">🏷 Manual download</span>`;
   const creator = m.creator ? `by ${esc(m.creator)}` : '';
   const date = m.created_at ? new Date(m.created_at).toLocaleDateString() : '';
-  // Search haystack (lowercased once, here): title, creator, filename.
-  const hay = [m.title, m.creator, m.filename, m.collection_title]
-    .filter(Boolean).join(' ').toLowerCase();
   return `
-  <div class="model-card" data-search="${esc(hay)}">
+  <div class="model-card">
     <a class="cover" href="${esc(mwUrl)}" target="_blank" rel="noopener noreferrer" title="View on MakerWorld">${img}</a>
     <div class="meta title" title="${esc(m.title)}">${esc(m.title)}</div>
     <div class="meta sub">
@@ -348,41 +365,35 @@ async function downloadFile(id, name, btn) {
   }
 }
 
-// Client-side library search: filters the cards that are already rendered
-// (loaded pages + Load-more). Server-side LIKE search can come later if the
-// library ever outgrows local memory — the data-search attribute carries the
-// haystack so this stays a pure DOM operation.
-function applyLibSearch() {
-  const q = document.getElementById('libSearch').value.trim().toLowerCase();
-  const grid = document.getElementById('modelGrid');
-  let visible = 0;
-  for (const card of grid.children) {
-    const hay = card.dataset.search || '';
-    const show = !q || hay.includes(q);
-    card.hidden = !show;
-    if (show) visible++;
-  }
-  const empty = document.getElementById('libEmpty');
-  empty.hidden = visible > 0;
-  empty.textContent = q
-    ? `No models match “${q}”.`
-    : 'Nothing downloaded yet.';
+// Query for /api/models: label filter + search (server-side, so it covers
+// the whole library, not just the pages loaded so far).
+function libQuery(offset) {
+  const params = new URLSearchParams();
+  if (libFilter.label) params.set('label', libFilter.label);
+  const q = document.getElementById('libSearch').value.trim();
+  if (q) params.set('q', q);
+  params.set('limit', String(LIB_PAGE));
+  params.set('offset', String(offset));
+  return '/api/models?' + params.toString();
 }
 
+// Responses can arrive out of order while typing; only the latest counts.
+let libRequestSeq = 0;
+
 async function loadModels() {
+  const seq = ++libRequestSeq;
   try {
-    const params = new URLSearchParams();
-    if (libFilter.label) params.set('label', libFilter.label);
-    params.set('limit', String(LIB_PAGE));
-    params.set('offset', '0');
-    const r = await api('/api/models?' + params.toString());
+    const r = await api(libQuery(0));
+    if (seq !== libRequestSeq) return;  // a newer search superseded this one
     const grid = document.getElementById('modelGrid');
     const empty = document.getElementById('libEmpty');
+    const q = document.getElementById('libSearch').value.trim();
     document.getElementById('libCount').textContent = `${r.total} models`;
     empty.hidden = r.models.length > 0;
+    empty.textContent = q ? `No models match “${q}”.` : 'Nothing downloaded yet.';
     grid.innerHTML = r.models.map(modelCard).join('');
+    libShown = r.models.length;
     updateLoadMore(r.total);
-    applyLibSearch();  // re-apply an active search to the fresh page
   } catch (e) {
     toast(e.message, 'err');
   }
@@ -394,16 +405,13 @@ async function loadMoreModels() {
   if (!btn) return;
   btn.disabled = true;
   try {
-    const params = new URLSearchParams();
-    if (libFilter.label) params.set('label', libFilter.label);
-    params.set('limit', String(LIB_PAGE));
-    params.set('offset', String(libShown));
-    const r = await api('/api/models?' + params.toString());
+    const seq = libRequestSeq;
+    const r = await api(libQuery(libShown));
+    if (seq !== libRequestSeq) return;  // filter/search changed meanwhile
     const grid = document.getElementById('modelGrid');
     grid.insertAdjacentHTML('beforeend', r.models.map(modelCard).join(''));
     libShown += r.models.length;
     updateLoadMore(r.total);
-    applyLibSearch();
   } catch (e) {
     toast(e.message, 'err');
   } finally {
@@ -635,9 +643,12 @@ async function syncNow(cid) {
 }
 
 // ---------------------------------------------------------------- activity
+let activityKind = '';  // '' = all, else download / sync / error
+
 async function loadEvents() {
   try {
-    const r = await api('/api/events?limit=100');
+    const kind = activityKind ? '&kind=' + encodeURIComponent(activityKind) : '';
+    const r = await api('/api/events?limit=200' + kind);
     const el = document.getElementById('eventList');
     const empty = document.getElementById('evEmpty');
     empty.hidden = r.events.length > 0;

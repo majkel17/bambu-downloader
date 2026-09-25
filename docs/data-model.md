@@ -145,6 +145,20 @@ A **cache only**, rewritten wholesale by `refresh_my_collections()` from the
   boot, so restarting a fresh container causes **zero** MakerWorld requests)
   or manually via `POST /api/my-collections/refresh`.
 
+### `events` — activity log
+
+What the Activity tab shows: `ts` (unix seconds), `kind` (`download` / `sync`
+/ `error`), `message`, `extra` (JSON of the event's extra fields, e.g.
+`design_id`). Written by `add_event` once `main.py` wires the store (an
+in-memory ring buffer covers the time before that, and a failed write).
+The scheduler prunes hourly by age (`BND_EVENT_RETENTION_DAYS`, 30) and count
+(`BND_EVENT_MAX_ROWS`, 5000). SQLite reuses the freed pages, so the file
+levels off (~1 MB at the cap) rather than growing; no `VACUUM` needed.
+
+`collections.last_sync_total` / `last_sync_present` record the collection's
+size and how many of its designs are in the library as of the last sync
+(kept when a sync fails before listing) — the basis of `/api/collections/stats`.
+
 ### `download_failures` — give up on dead models
 
 One row per design that failed in a collection sync **because of the model

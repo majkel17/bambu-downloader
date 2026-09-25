@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -74,6 +75,18 @@ CREATE TABLE IF NOT EXISTS download_failures (
     last_attempt_at TEXT NOT NULL
 );
 
+-- Activity log shown in the UI's Activity tab. Pruned hourly by the
+-- scheduler (BND_EVENT_RETENTION_DAYS / BND_EVENT_MAX_ROWS); freed pages are
+-- reused, so the file levels off instead of growing forever.
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    kind TEXT NOT NULL,
+    message TEXT NOT NULL,
+    extra TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
+
 CREATE TABLE IF NOT EXISTS remote_collections (
     collection_id INTEGER PRIMARY KEY,
     title TEXT,
@@ -133,6 +146,9 @@ class Database:
                 "ALTER TABLE models ADD COLUMN collection_title TEXT",
                 "ALTER TABLE models ADD COLUMN creator TEXT",
                 "ALTER TABLE collections ADD COLUMN plates_mode TEXT NOT NULL DEFAULT 'default'",
+                # Collection size / designs in the library, as of the last sync.
+                "ALTER TABLE collections ADD COLUMN last_sync_total INTEGER",
+                "ALTER TABLE collections ADD COLUMN last_sync_present INTEGER",
                 # Hot-path indexes (no-op when they exist). cover: looked up
                 # by every /thumb request; created_at: list_models' default
                 # sort; collection_id: the label/collection filters.
@@ -500,9 +516,11 @@ class Database:
         collection_id: int | None = None,
         no_collection: bool = False,
         label: str | None = None,
+        q: str | None = None,
     ) -> tuple[str, list[Any]]:
         """Shared WHERE builder so list/count totals always match the grid.
-        Filters combine with AND."""
+        Filters combine with AND; q is a case-insensitive (ASCII) substring
+        match on title, creator, filename and origin label."""
         where: list[str] = []
         params: list[Any] = []
         if collection_id is not None:
@@ -516,6 +534,18 @@ class Database:
             else:
                 where.append("collection_title = ?")
                 params.append(label)
+        if q and q.strip():
+            # Escape LIKE wildcards so "100%" or "a_b" match literally.
+            pat = "%" + re.sub(r"([\\%_])", r"\\\1", q.strip()) + "%"
+            where.append(
+                "("
+                + " OR ".join(
+                    f"{col} LIKE ? ESCAPE '\\'"
+                    for col in ("title", "creator", "filename", "collection_title")
+                )
+                + ")"
+            )
+            params.extend([pat] * 4)
         return (" WHERE " + " AND ".join(where)) if where else "", params
 
     def list_models(
@@ -525,9 +555,10 @@ class Database:
         label: str | None = None,
         limit: int = 500,
         offset: int = 0,
+        q: str | None = None,
     ) -> list[dict[str, Any]]:
         """List model rows (newest first) with the given origin filters."""
-        where_sql, params = self._model_filters(collection_id, no_collection, label)
+        where_sql, params = self._model_filters(collection_id, no_collection, label, q)
         query = (
             f"SELECT * FROM models{where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?"
         )
@@ -540,9 +571,10 @@ class Database:
         collection_id: int | None = None,
         no_collection: bool = False,
         label: str | None = None,
+        q: str | None = None,
     ) -> int:
         """Count model rows matching the same filters list_models accepts."""
-        where_sql, params = self._model_filters(collection_id, no_collection, label)
+        where_sql, params = self._model_filters(collection_id, no_collection, label, q)
         query = f"SELECT COUNT(*) as c FROM models{where_sql}"
         with self.connect() as conn:
             return conn.execute(query, params).fetchone()["c"]
@@ -645,18 +677,111 @@ class Database:
                 (mode, collection_id),
             )
 
-    def record_sync(self, collection_id: int, status: str, new_count: int) -> None:
+    def record_sync(
+        self,
+        collection_id: int,
+        status: str,
+        new_count: int,
+        total: int | None = None,
+        present: int | None = None,
+    ) -> None:
         """Stamp a collection with the outcome of a sync run.
 
         Writing last_sync_at here also schedules the next attempt: the
         scheduler only picks a collection up again once its interval has
-        elapsed past this timestamp.
+        elapsed past this timestamp. total/present (collection size and how
+        many of its designs are in the library) keep their previous values
+        when a failed sync couldn't list the collection (None).
         """
         with self.connect() as conn:
             conn.execute(
-                "UPDATE collections SET last_sync_at = ?, last_sync_status = ?, last_sync_new = ? WHERE collection_id = ?",
-                (utcnow(), status, new_count, collection_id),
+                """UPDATE collections SET last_sync_at = ?, last_sync_status = ?,
+                     last_sync_new = ?,
+                     last_sync_total = COALESCE(?, last_sync_total),
+                     last_sync_present = COALESCE(?, last_sync_present)
+                   WHERE collection_id = ?""",
+                (utcnow(), status, new_count, total, present, collection_id),
             )
+
+    def count_present(self, design_ids: list[int]) -> int:
+        """How many of these designs have at least one file in the library."""
+        found: set[int] = set()
+        ordered = sorted(set(design_ids))
+        with self.connect() as conn:
+            for start in range(0, len(ordered), 500):
+                chunk = ordered[start : start + 500]
+                qmarks = ",".join("?" * len(chunk))
+                found.update(
+                    int(r["design_id"])
+                    for r in conn.execute(
+                        f"SELECT DISTINCT design_id FROM models WHERE design_id IN ({qmarks})",
+                        chunk,
+                    )
+                )
+        return len(found)
+
+    def collection_stats(self, max_attempts: int) -> list[dict[str, Any]]:
+        """Per-collection progress for dashboards (Home Assistant etc.)."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT c.collection_id, c.title, c.enabled, c.last_sync_at,
+                          c.last_sync_status, c.last_sync_new,
+                          c.last_sync_total AS total, c.last_sync_present AS present,
+                          (SELECT COUNT(*) FROM download_failures f
+                            WHERE f.collection_id = c.collection_id
+                              AND ? > 0 AND f.attempts >= ?) AS skipped
+                   FROM collections c ORDER BY c.created_at DESC""",
+                (max_attempts, max_attempts),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    # ---- events (activity log) ----
+    def add_event(self, ts: float, kind: str, message: str, extra: str | None) -> None:
+        """Append one activity-log row (extra is a JSON object or None)."""
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT INTO events(ts, kind, message, extra) VALUES(?, ?, ?, ?)",
+                (ts, kind, message, extra),
+            )
+
+    def recent_events(
+        self, limit: int = 50, kind: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Newest-first activity rows, optionally of one kind only."""
+        where, params = ("WHERE kind = ?", [kind]) if kind else ("", [])
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"SELECT ts, kind, message, extra FROM events {where} "
+                "ORDER BY id DESC LIMIT ?",
+                [*params, limit],
+            ).fetchall()
+        out = []
+        for r in rows:
+            ev = {"ts": r["ts"], "kind": r["kind"], "message": r["message"]}
+            if r["extra"]:
+                try:
+                    ev = {**json.loads(r["extra"]), **ev}
+                except ValueError:
+                    pass
+            out.append(ev)
+        return out
+
+    def prune_events(self, max_age_days: int, max_rows: int, now: float) -> int:
+        """Drop events older than max_age_days and beyond the newest max_rows
+        (0 disables either limit). Returns the number of rows deleted."""
+        deleted = 0
+        with self.connect() as conn:
+            if max_age_days > 0:
+                deleted += conn.execute(
+                    "DELETE FROM events WHERE ts < ?", (now - max_age_days * 86400,)
+                ).rowcount
+            if max_rows > 0:
+                deleted += conn.execute(
+                    """DELETE FROM events WHERE id <= (
+                         SELECT id FROM events ORDER BY id DESC LIMIT 1 OFFSET ?)""",
+                    (max_rows,),
+                ).rowcount
+        return deleted
 
     def delete_collection(self, collection_id: int) -> None:
         """Unfollow a collection (model rows are kept; see delete_models)."""

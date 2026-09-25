@@ -145,7 +145,7 @@
     <div class="card">
       <h2>📚 Downloaded models <span class="tag" id="libCount"></span></h2>
       <div class="row" style="margin-bottom:0.6rem">
-        <input type="text" id="libSearch" placeholder="Search title, creator, filename…">
+        <input type="text" id="libSearch" placeholder="Search the whole library: title, creator, filename, collection…">
         <button class="ghost" data-action="lib-clear">Clear</button>
       </div>
       <div class="chip-bar" id="labelChips"></div>
@@ -198,7 +198,15 @@
   <!-- Activity tab -->
   <section id="tab-activity" class="tab" hidden>
     <div class="card">
-      <h2>⚡ Recent activity</h2>
+      <h2>⚡ Recent activity
+        <span class="spacer" style="flex:1"></span>
+        <select id="evKind" title="Show only…">
+          <option value="">All</option>
+          <option value="error">Errors</option>
+          <option value="download">Downloads</option>
+          <option value="sync">Syncs</option>
+        </select>
+      </h2>
       <div id="eventList"></div>
       <div class="empty" id="evEmpty">No activity yet.</div>
     </div>
