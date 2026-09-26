@@ -106,7 +106,7 @@ sensitive; the API-key gate exists because of this.
 | `POST /api/download`, `POST /api/resolve` | Download a URL / preview metadata+plates |
 | `GET /api/models`, `/api/model-labels`, `/api/events` | Library grid (`?q=` server-side search), origin-label filter bar, activity log (SQLite, `?kind=download\|sync\|error`) |
 | `GET /api/models/{id}/file` | Download a stored model file (attachment; only paths inside the downloads root) |
-| `GET /api/collections`, `POST /api/collections`, `PATCH/DELETE /api/collections/{id}` | Follow / configure / unfollow (optional file deletion) |
+| `GET /api/collections`, `POST /api/collections`, `PATCH/DELETE /api/collections/{id}` | Follow / configure / unfollow (optional file deletion); the list carries `next_sync_at` and `syncing` |
 | `GET /api/collections/stats`, `GET /api/collections/{id}/stats` | Per-collection progress for dashboards (Home Assistant; see README) |
 | `GET /api/skipped-models`, `POST /api/skipped-models/{design_id}/retry` | Designs syncs gave up on (`BND_MAX_DOWNLOAD_ATTEMPTS`) / reset one for the next sync |
 | `POST /api/collections/{id}/sync` | Manual sync now (background task; `{"started": false}` if that collection is already syncing, scheduled or manual) |

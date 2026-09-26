@@ -102,6 +102,10 @@ CREATE TABLE IF NOT EXISTS remote_collections (
 """
 
 
+# remote_collections.design_ids is capped at this many ids per collection
+# (makerworld.list_my_collections' max_designs_per_collection default).
+CAP_DESIGN_IDS = 1000
+
 # When a download_failures row makes syncs skip its design: enough attempts,
 # or a reason that retrying can't fix (no print profile). Bound to
 # (max_attempts, max_attempts); max_attempts 0 disables skipping entirely.
@@ -898,10 +902,18 @@ class Database:
                 item["design_ids"] = ids
                 item["checked_ids"] = checked_ids
                 item["downloaded_count"] = len(checked_ids)
+                # MakerWorld's designCnt also counts designs that were removed
+                # or hidden since they were added, but the designs pager only
+                # returns visible ones — the gap can never be downloaded.
+                # (Only trusted below the pager cap, where ids are complete.)
+                count = item["design_count"] or 0
+                item["hidden_count"] = (
+                    max(0, count - len(ids)) if 0 < len(ids) < CAP_DESIGN_IDS else 0
+                )
+                available = count - item["hidden_count"]
+                item["available_count"] = available
                 item["downloaded"] = (
-                    item["downloaded_count"] >= item["design_count"]
-                    if (item["design_count"] or 0) > 0
-                    else False
+                    item["downloaded_count"] >= available if available > 0 else False
                 )
                 out.append(item)
             return out

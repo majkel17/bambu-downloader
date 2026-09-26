@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hmac
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -416,8 +417,32 @@ async def events(limit: int = 50, kind: str | None = None) -> dict[str, Any]:
 # -------------------------------------------------------------- collections
 @router.get("/collections")
 async def collections() -> list[dict[str, Any]]:
-    """List all followed collections with their sync state."""
-    return db.list_collections()
+    """List all followed collections with their sync state.
+
+    next_sync_at is when the scheduler considers the collection due again
+    (last sync + interval; null = due now / never synced); the actual run
+    happens on the next scheduler tick after that. syncing = in flight.
+    """
+    out = []
+    for c in db.list_collections():
+        next_at = None
+        if c["last_sync_at"]:
+            try:
+                next_at = (
+                    datetime.fromisoformat(c["last_sync_at"])
+                    + timedelta(minutes=c["sync_interval_minutes"])
+                ).isoformat()
+            except ValueError:
+                pass
+        cid = c["collection_id"]
+        out.append(
+            {
+                **c,
+                "next_sync_at": next_at,
+                "syncing": manager.is_syncing(cid) or cid in scheduler.active,
+            }
+        )
+    return out
 
 
 @router.get("/my-collections")
