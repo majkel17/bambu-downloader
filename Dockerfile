@@ -34,9 +34,10 @@ EXPOSE 8080
 
 # Uvicorn runs as PID 1: it traps SIGTERM/SIGINT itself, drains connections,
 # and runs the lifespan shutdown (scheduler cancel) — clean podman stop.
-# HEALTHCHECK pings the status endpoint; podman/Kube share it via healthfile.
+# HEALTHCHECK pings /healthz (open even with BND_API_KEY set, no outbound
+# calls); podman/Kube share it via healthfile.
 HEALTHCHECK --interval=60s --timeout=5s --start-period=10s --retries=3 \
-  CMD python -c "import urllib.request,os,sys;sys.exit(0 if urllib.request.urlopen(f'http://127.0.0.1:{os.environ.get(\"BND_PORT\",\"8080\")}/api/status',timeout=4).status==200 else 1)"
+  CMD python -c "import urllib.request,os,sys;sys.exit(0 if urllib.request.urlopen(f'http://127.0.0.1:{os.environ.get(\"BND_PORT\",\"8080\")}/healthz',timeout=4).status==200 else 1)"
 
 # --timeout-graceful-shutdown bounds the drain window so podman stop's 10s
 # default never escalates to SIGKILL mid-checkpoint.

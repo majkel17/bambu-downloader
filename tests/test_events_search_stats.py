@@ -216,3 +216,17 @@ def test_read_key_alone_does_not_lock_the_app(app_client, monkeypatch):
     monkeypatch.setattr(routes.settings, "api_key", None)
     monkeypatch.setattr(routes.settings, "read_api_key", "read-key")
     assert client.get("/api/collections/stats").status_code == 200
+
+
+# ------------------------------------------------------------- healthcheck
+def test_healthz_is_open_with_api_key(app_client, monkeypatch):
+    """The container healthcheck carries no key: /healthz must stay open
+    while /api/* is locked."""
+    import app.routes as routes
+
+    client, _, _ = app_client
+    monkeypatch.setattr(routes.settings, "api_key", "full-key")
+    assert client.get("/api/status").status_code == 401
+    r = client.get("/healthz")
+    assert r.status_code == 200
+    assert r.json() == {"ok": True}

@@ -291,6 +291,18 @@ async def index():
     )
 
 
+@app.get("/healthz")
+async def healthz():
+    """Liveness probe for the container healthcheck.
+
+    Deliberately outside /api: open even when BND_API_KEY is set (the
+    healthcheck has no key) and it reveals nothing. Unlike /api/status it
+    never triggers a token check against Bambu, so a probe every minute
+    costs no outbound request.
+    """
+    return {"ok": True}
+
+
 @app.get("/favicon.ico")
 async def favicon():
     """Serve the app icon as the browser favicon."""

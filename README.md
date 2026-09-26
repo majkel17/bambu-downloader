@@ -221,3 +221,11 @@ Things worth knowing before changing code:
 - **Tests:** the `app_client` fixture reloads the app modules, so in tests
   refer to exception classes through the module (`app.downloader.NotFoundError`)
   at call time rather than importing them at the top of the file.
+
+## License
+
+[MIT](LICENSE) — do what you like with it. The one condition is keeping the
+copyright notice: if you build on this, credit
+**[majkel17/bambu-downloader](https://github.com/majkel17/bambu-downloader)**.
+The original upstream code by [sebasdoes](https://github.com/sebasdoes/bambu-downloader)
+was published without a license; this covers the changes made in this fork.
