@@ -41,6 +41,8 @@
   button.ghost:hover { border-color: var(--green-dim); }
   button.danger { padding: 0.45rem 0.8rem; border-radius: 8px; border: 1px solid #5c2626; background: none; color: var(--red); cursor: pointer; font-size: 0.85rem; }
   .muted { color: var(--muted); font-size: 0.85rem; }
+  .hint.warn { color: var(--red); }
+  #mineInterval { width: 80px; min-width: 80px; }
   /* Long unbroken tokens (emails, paths, filenames) must wrap, not force the
      page wider than the viewport — that overflowed the header on mobile. */
   .event, .model-card .sub, .coll-item, .hint { overflow-wrap: anywhere; }
@@ -177,14 +179,18 @@
     <div class="card">
       <h2>Your MakerWorld collections <span class="tag" id="mineMeta"></span>
         <span class="spacer" style="flex:1"></span>
+        <span class="interval" title="How often this list is re-fetched from MakerWorld">
+          every <input type="number" id="mineInterval" min="15" max="10080" step="5"> min
+        </span>
         <button class="ghost" data-action="refresh-mine">Refresh</button>
       </h2>
-      <p class="hint" id="mineHint">All collections from your signed-in account, with ✓ per model already in your library. Refreshes automatically every hour.</p>
+      <p class="hint" id="mineHint">All collections from your signed-in account, with ✓ per model already in your library. Refreshed automatically at the interval above.</p>
       <div id="mineList"></div>
       <div class="empty" id="mineEmpty">Sign in and the list appears here.</div>
     </div>
     <div class="card">
       <h2>Followed collections</h2>
+      <p class="hint warn" id="collPaused" hidden>Not signed in — syncs are paused. Sign in under Settings and they resume automatically.</p>
       <div id="collList"></div>
       <div class="empty" id="collEmpty">No collections followed yet.</div>
     </div>
@@ -215,7 +221,14 @@
   <!-- Settings tab -->
   <section id="tab-settings" class="tab" hidden>
     <div class="card" id="loginCard">
-      <h2>🔐 MakerWorld sign-in</h2>
+      <h2>🔐 MakerWorld account</h2>
+      <div id="accountView" hidden>
+        <p>Signed in as <b id="accountEmail"></b> <span class="tag" id="accountRegion"></span></p>
+        <p class="hint">Signing out keeps your downloaded files, library and followed collections — syncs just pause until you sign in again. The list of your own MakerWorld collections is cleared (it belongs to the account).</p>
+        <div class="row"><button class="danger" data-action="logout">Sign out</button></div>
+      </div>
+      <div id="loginForm">
+      <p class="hint" id="loginExpired" hidden></p>
       <div class="login-steps"><span class="step on" id="stepBadge1">1</span><span class="step" id="stepBadge2">2</span></div>
       <div id="loginStep1">
         <div class="row" style="margin-bottom:0.5rem">
@@ -243,6 +256,7 @@
           <input type="text" id="otpCode" placeholder="6-digit code" inputmode="numeric" style="max-width:180px">
           <button class="primary" data-action="verify">Verify</button>
         </div>
+      </div>
       </div>
     </div>
     <div class="card">

@@ -27,7 +27,7 @@ from .makerworld import (
     parse_model_url,
     release_client,
 )
-from .scheduler import SyncScheduler, trigger_sync
+from .scheduler import MIN_MINE_REFRESH_MINUTES, SyncScheduler, trigger_sync
 
 
 def _key_matches(given: str | None, expected: str | None) -> bool:
@@ -291,9 +291,16 @@ async def set_token(req: TokenRequest) -> dict[str, Any]:
 
 @router.post("/auth/logout")
 async def logout() -> dict[str, Any]:
-    """Forget the stored credentials (token, refresh token, email)."""
+    """Forget the stored credentials (token, refresh token, email).
+
+    The own-collections cache goes too (it belongs to that account); the
+    library, downloaded files and followed collections stay — syncs just
+    pause until someone signs in again.
+    """
     for key in ("bambu_token", "bambu_token_refresh", "bambu_email"):
         db.delete_meta(key)
+    db.clear_remote_collections()
+    scheduler.reschedule_mine_refresh()
     # Pooled clients carried the old token — drop them so nothing reused
     # after logout still sends it.
     await invalidate_shared_clients()
@@ -437,7 +444,32 @@ async def my_collections() -> dict[str, Any]:
         "collections": rows,
         "fetched_at": db.remote_collections_fetched_at(),
         "authenticated": bool(db.get_meta("bambu_token")),
+        "refresh_minutes": scheduler.mine_refresh_minutes(),
     }
+
+
+class MyCollectionsSettings(BaseModel):
+    """Body for PUT /api/my-collections/settings."""
+
+    refresh_minutes: int
+
+
+@router.put("/my-collections/settings")
+async def my_collections_settings(req: MyCollectionsSettings) -> dict[str, Any]:
+    """Set how often the own-collections listing is re-fetched (minutes).
+
+    Stored in the DB (overrides BND_MY_COLLECTIONS_REFRESH_MINUTES); 15
+    minutes is the floor, one week the ceiling. The next refresh is
+    rescheduled from the cache's age, so a change doesn't fire a request.
+    """
+    if not MIN_MINE_REFRESH_MINUTES <= req.refresh_minutes <= 10080:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Interval must be {MIN_MINE_REFRESH_MINUTES} to 10080 minutes",
+        )
+    db.set_meta("my_collections_refresh_minutes", str(req.refresh_minutes))
+    scheduler.reschedule_mine_refresh()
+    return {"refresh_minutes": scheduler.mine_refresh_minutes()}
 
 
 @router.post("/my-collections/refresh")

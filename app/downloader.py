@@ -38,6 +38,22 @@ class ModelUnavailableError(MakerWorldError):
     """MakerWorld has the design but won't hand out a file for it."""
 
 
+class NoProfileError(ModelUnavailableError):
+    """The design has no print profile (only STL/CAD files) — nothing to
+    download as 3MF, and retrying won't change that."""
+
+
+def _failure_reason(e: MakerWorldError) -> str:
+    """Short reason code stored with a failure (shown in Skipped models)."""
+    if isinstance(e, NoProfileError):
+        return "no_profile"
+    if isinstance(e, NotFoundError):
+        return "not_found"
+    if isinstance(e, ForbiddenError):
+        return "forbidden"
+    return "no_download_url"
+
+
 def _counts_against_model(e: MakerWorldError) -> bool:
     """Whether a failure is the model's fault (removed, private, no file) and
     so counts toward BND_MAX_DOWNLOAD_ATTEMPTS. Network trouble, CAPTCHA,
@@ -507,6 +523,12 @@ class DownloadManager:
                         except CaptchaError:
                             raise
                         except MakerWorldError as e:
+                            if not instances:
+                                # No plate instances at all = no print profile;
+                                # the design only ships STL/CAD files.
+                                raise NoProfileError(
+                                    "No print profile — the design only has STL/CAD files"
+                                ) from e
                             raise ModelUnavailableError(
                                 f"Could not get a download URL — you are probably not signed in. ({e})"
                             ) from e
@@ -780,8 +802,22 @@ class DownloadManager:
         limit = settings.max_download_attempts
         if not _counts_against_model(e):
             return False
-        attempts = self.db.record_failure(design_id, collection_id, str(e))
-        if limit and attempts == limit:
+        reason = _failure_reason(e)
+        attempts = self.db.record_failure(design_id, collection_id, str(e), reason)
+        if not limit:
+            return False
+        if reason == "no_profile":
+            # Deterministic: skip right away, retrying can't help. Logged
+            # every time — a skipped design isn't tried again until Retry.
+            await add_event(
+                "error",
+                f"Model {design_id}: no print profile (STL/CAD only) — skipped "
+                "from now on (retry it from the Collections tab)",
+                design_id=design_id,
+                collection_id=collection_id,
+            )
+            return True
+        if attempts == limit:
             await add_event(
                 "error",
                 f"Model {design_id}: skipped from now on after {attempts} failed "
@@ -789,7 +825,7 @@ class DownloadManager:
                 design_id=design_id,
                 collection_id=collection_id,
             )
-        return bool(limit) and attempts >= limit
+        return attempts >= limit
 
     async def _design_instances(self, design_id: int) -> list[dict[str, Any]]:
         """Fetch a design's plate instances via a fresh (short-lived) client.

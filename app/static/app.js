@@ -32,6 +32,8 @@ function wireEvents() {
     clearTimeout(searchTimer);
     searchTimer = setTimeout(() => { libShown = LIB_PAGE; loadModels(); }, 250);
   });
+  const mineInterval = document.getElementById('mineInterval');
+  if (mineInterval) mineInterval.addEventListener('change', () => setMineInterval(mineInterval.value));
   const evKind = document.getElementById('evKind');
   if (evKind) evKind.addEventListener('change', () => {
     activityKind = evKind.value;
@@ -98,6 +100,7 @@ function handleAction(action, el) {
     'login': () => doLogin(),
     'verify': () => doVerify(),
     'token-login': () => doTokenLogin(),
+    'logout': () => doLogout(),
     'refresh-status': () => loadAll(),
     'api-save': () => saveApiKey(),
     'api-clear': () => clearApiKey(),
@@ -217,6 +220,7 @@ async function loadStatus() {
   try {
     const s = await api('/api/status');
     const badge = document.getElementById('authBadge');
+    renderAccount(s);
     if (s.authenticated) {
       badge.textContent = '✓ ' + (s.email || 'signed in');
       badge.className = 'auth-badge on';
@@ -245,6 +249,28 @@ async function loadStatus() {
   } catch (e) {
     console.error('status failed', e);
   }
+}
+
+// Settings → account card: who is signed in + Sign out, or the login form.
+function renderAccount(s) {
+  document.getElementById('accountView').hidden = !s.authenticated;
+  document.getElementById('loginForm').hidden = s.authenticated;
+  document.getElementById('accountEmail').textContent = s.email || '(token sign-in)';
+  document.getElementById('accountRegion').textContent = s.region || '';
+  const expired = document.getElementById('loginExpired');
+  expired.hidden = !s.token_invalid;
+  expired.textContent = s.token_invalid ? 'Your MakerWorld session expired — sign in again.' : '';
+  document.getElementById('collPaused').hidden = s.authenticated;
+}
+
+async function doLogout() {
+  if (!confirm('Sign out of MakerWorld? Downloaded files and followed collections stay; syncs pause until you sign in again.')) return;
+  try {
+    await api('/api/auth/logout', { method: 'POST' });
+    toast('Signed out', 'ok');
+    loadStatus();
+    loadMyCollections();
+  } catch (e) { toast(e.message, 'err'); }
 }
 
 // --------------------------------------------------------------- downloads
@@ -464,6 +490,8 @@ async function loadMyCollections() {
     }
     empty.hidden = r.collections.length > 0;
     if (!r.collections.length) empty.textContent = 'Nothing cached yet — click Refresh, or wait for the next hourly fetch.';
+    const iv = document.getElementById('mineInterval');
+    if (document.activeElement !== iv) iv.value = r.refresh_minutes;
     const when = r.fetched_at ? new Date(r.fetched_at).toLocaleString() : null;
     meta.textContent = when ? `updated ${when}` : 'not fetched yet';
     const rows = r.collections.map(c => {
@@ -488,6 +516,18 @@ async function loadMyCollections() {
     el.innerHTML = rows;
   } catch (e) {
     toast(e.message, 'err');
+  }
+}
+
+async function setMineInterval(minutes) {
+  try {
+    const r = await api('/api/my-collections/settings', {
+      method: 'PUT', body: { refresh_minutes: parseInt(minutes, 10) || 0 },
+    });
+    toast(`Your collections refresh every ${r.refresh_minutes} min`, 'ok');
+  } catch (e) {
+    toast(e.message, 'err');
+    loadMyCollections();  // restore the stored value
   }
 }
 
@@ -606,6 +646,14 @@ async function doRemoveColl(deleteFiles) {
   } catch (e) { toast(e.message, 'err'); }
 }
 
+// Human labels for download_failures.reason codes.
+const SKIP_REASONS = {
+  no_profile: 'No print profile (STL/CAD only)',
+  not_found: 'Removed (404)',
+  forbidden: 'No access (403)',
+  no_download_url: 'No download link',
+};
+
 // Models syncs gave up on (BND_MAX_DOWNLOAD_ATTEMPTS model-caused failures).
 async function loadSkipped() {
   try {
@@ -616,10 +664,12 @@ async function loadSkipped() {
     document.getElementById('skippedList').innerHTML = r.models.map(m => {
       const mw = `https://makerworld.com/en/models/${m.design_id}`;
       const coll = m.collection_title ? ` · 🗂 ${esc(m.collection_title)}` : '';
+      const reason = SKIP_REASONS[m.reason] || 'Failed repeatedly';
       return `
       <div class="coll-item">
         <a class="title" href="${esc(mw)}" target="_blank" rel="noopener noreferrer">Model #${m.design_id}</a>
-        <span class="muted">${m.attempts} attempts · last ${new Date(m.last_attempt_at).toLocaleString()}${coll}</span>
+        <span class="tag warn">${esc(reason)}</span>
+        <span class="muted">${m.attempts} attempt${m.attempts === 1 ? '' : 's'} · last ${new Date(m.last_attempt_at).toLocaleString()}${coll}</span>
         <span class="muted" style="flex-basis:100%">${esc(m.last_error || '')}</span>
         <button class="ghost" data-action="retry-skipped" data-did="${m.design_id}">Retry on next sync</button>
       </div>`;

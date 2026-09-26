@@ -95,10 +95,11 @@ Environment variables (all optional — defaults shown):
 | `BND_PORT` | `8080` | Web UI port |
 | `BND_SCHEDULER_INTERVAL_SECONDS` | `300` | How often the scheduler checks for due collections |
 | `BND_SYNC_INTERVAL_MINUTES` | `360` | Default sync interval for newly added collections |
+| `BND_MY_COLLECTIONS_REFRESH_MINUTES` | `60` | Default refresh interval of the "Your MakerWorld collections" list (min 15). Changeable in the UI (Collections tab), which then takes precedence |
 | `BND_DOWNLOAD_DELAY_SECONDS` | `3` | Pause between downloads inside a sync (anti rate-limit) |
 | `BND_EVENT_RETENTION_DAYS` | `30` | Activity-log entries older than this are pruned (hourly). `0` = keep forever |
 | `BND_EVENT_MAX_ROWS` | `5000` | …and only the newest N are kept (~1 MB of SQLite). `0` = no cap |
-| `BND_MAX_DOWNLOAD_ATTEMPTS` | `3` | Syncs skip a model after this many failures caused by the model itself (404 / private / no download URL); network, CAPTCHA and sign-in problems don't count. Skipped models are listed in Collections with a Retry button. `0` = retry forever |
+| `BND_MAX_DOWNLOAD_ATTEMPTS` | `3` | Syncs skip a model after this many failures caused by the model itself (404 / private / no download URL); a design with **no print profile** (STL/CAD only) is skipped after the first failure. Network, CAPTCHA and sign-in problems don't count. Skipped models are listed in Collections with a Retry button. `0` = retry forever |
 
 ## Home Assistant
 

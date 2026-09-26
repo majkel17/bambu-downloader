@@ -111,6 +111,7 @@ sensitive; the API-key gate exists because of this.
 | `GET /api/skipped-models`, `POST /api/skipped-models/{design_id}/retry` | Designs syncs gave up on (`BND_MAX_DOWNLOAD_ATTEMPTS`) / reset one for the next sync |
 | `POST /api/collections/{id}/sync` | Manual sync now (background task; `{"started": false}` if that collection is already syncing, scheduled or manual) |
 | `GET /api/my-collections`, `POST /api/my-collections/refresh` | Own-collection cache + manual refresh (429 on captcha) |
+| `PUT /api/my-collections/settings` | `{"refresh_minutes": 15–10080}` — own-collections refresh interval (stored in the DB) |
 | `GET /api/shared-model` | PWA share-target URL validation |
 | `GET /thumb?url=…` | Cover proxy (ETag/304, host-allowlisted, w clamped 64–1920) |
 | `/`, `/static/*`, `/manifest.webmanifest`, `/sw.js`, `/favicon.ico` | PWA shell |
