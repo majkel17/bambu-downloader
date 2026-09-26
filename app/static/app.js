@@ -5,6 +5,7 @@ let pendingTfaKey = null;
 let loginEmail = '';
 let loginRegion = 'global';
 let eventTimer = null;
+let lastStatus = null;  // latest /api/status (auth state for other views)
 
 // ------------------------------------------------------------ CSP-safe events
 // The server sends a strict CSP (script-src 'self'; no 'unsafe-inline'), so
@@ -219,6 +220,7 @@ function showTab(name) {
 async function loadStatus() {
   try {
     const s = await api('/api/status');
+    lastStatus = s;
     const badge = document.getElementById('authBadge');
     renderAccount(s);
     if (s.authenticated) {
@@ -495,12 +497,18 @@ async function loadMyCollections() {
     const when = r.fetched_at ? new Date(r.fetched_at).toLocaleString() : null;
     meta.textContent = when ? `updated ${when}` : 'not fetched yet';
     const rows = r.collections.map(c => {
-      const pct = c.design_count ? Math.round(100 * c.downloaded_count / c.design_count) : 0;
+      // available = what MakerWorld still lists; hidden = removed/hidden
+      // designs its count still includes (never downloadable).
+      const available = c.available_count ?? c.design_count;
+      const pct = available ? Math.round(100 * c.downloaded_count / available) : 0;
       const state = c.downloaded
-        ? '<span class="mine-check">✓ all downloaded</span>'
+        ? `<span class="mine-check">✓ all ${available} downloaded</span>`
         : (c.downloaded_count > 0
-            ? `<span class="mine-partial">✓ ${c.downloaded_count}/${c.design_count} downloaded</span>`
-            : `<span class="mine-none">${c.design_count} models · none downloaded</span>`);
+            ? `<span class="mine-partial">✓ ${c.downloaded_count}/${available} downloaded</span>`
+            : `<span class="mine-none">${available} models · none downloaded</span>`);
+      const hidden = c.hidden_count
+        ? `<span class="muted" title="MakerWorld still counts these in the collection, but no longer lists them — they can't be downloaded">+ ${c.hidden_count} removed or hidden on MakerWorld</span>`
+        : '';
       const follow = c.followed
         ? `<span class="tag ok">following</span>`
         : `<button class="ghost" data-action="follow-mine" data-cid="${c.collection_id}" data-slug="${esc(c.slug || String(c.collection_id))}">Follow</button>`;
@@ -509,6 +517,7 @@ async function loadMyCollections() {
       <div class="mine-item">
         <a class="title" href="${esc(mw)}" target="_blank" rel="noopener noreferrer">${c.title ? esc(c.title) : 'Collection ' + c.collection_id}</a>
         ${state}
+        ${hidden}
         <div class="mine-progress" title="${pct}% downloaded"><div style="width:${pct}%"></div></div>
         ${follow}
       </div>`;
@@ -552,12 +561,20 @@ async function refreshMyCollections() {
   } catch (e) { toast(e.message, 'err'); }
 }
 
+let collTimer = null;
+
 function startMinePolling() {
   loadMyCollections();
   if (!mineTimer) mineTimer = setInterval(loadMyCollections, 5 * 60 * 1000);
+  // Followed collections: keep "syncing now" / "next sync" current, but
+  // never re-render under someone editing an interval or plates select.
+  if (!collTimer) collTimer = setInterval(() => {
+    if (!document.getElementById('collList').contains(document.activeElement)) loadCollections();
+  }, 30 * 1000);
 }
 function stopMinePolling() {
   if (mineTimer) { clearInterval(mineTimer); mineTimer = null; }
+  if (collTimer) { clearInterval(collTimer); collTimer = null; }
 }
 
 async function loadCollections() {
@@ -572,6 +589,7 @@ async function loadCollections() {
         <span class="tag ${c.enabled ? 'ok' : 'warn'}">${c.enabled ? 'active' : 'paused'}</span>
         <span class="muted">${c.last_sync_at ? 'last sync ' + new Date(c.last_sync_at).toLocaleString() : 'never synced'}</span>
         <span class="muted">${c.last_sync_new != null ? c.last_sync_new : 0} new last time</span>
+        <span class="muted">${nextSyncText(c)}</span>
         <span class="interval">
           <input type="number" value="${c.sync_interval_minutes}" min="15" step="15"> min
         </span>
@@ -590,10 +608,25 @@ async function loadCollections() {
   }
 }
 
+// "next sync …" for a followed collection row. The scheduler picks a due
+// collection up on its next tick (every few minutes), hence "~".
+function nextSyncText(c) {
+  if (c.syncing) return '⟳ syncing now';
+  if (!c.enabled) return 'next sync: paused';
+  if (lastStatus && !lastStatus.authenticated) return 'next sync: after sign-in';
+  if (!c.next_sync_at) return 'next sync: within minutes';
+  const at = new Date(c.next_sync_at);
+  if (at <= new Date()) return 'next sync: within minutes';
+  const sameDay = at.toDateString() === new Date().toDateString();
+  const when = at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return 'next sync ~' + (sameDay ? when : at.toLocaleDateString([], { day: '2-digit', month: '2-digit' }) + ' ' + when);
+}
+
 async function setInterval_(cid, minutes) {
   try {
     await api(`/api/collections/${cid}`, { method: 'PATCH', body: { sync_interval_minutes: parseInt(minutes, 10) || 360 } });
     toast('Interval updated', 'ok');
+    loadCollections();  // next-sync time moves with the interval
   } catch (e) { toast(e.message, 'err'); }
 }
 
@@ -689,6 +722,7 @@ async function syncNow(cid) {
   try {
     const r = await api(`/api/collections/${cid}/sync`, { method: 'POST' });
     toast(r.started ? 'Sync started — watch Activity' : 'Sync already running', 'ok');
+    loadCollections();
   } catch (e) { toast(e.message, 'err'); }
 }
 

@@ -145,6 +145,11 @@ A **cache only**, rewritten wholesale by `refresh_my_collections()` from the
   this refresh nor collection syncs run.
 - Read paths compute download checkmarks at query time by chunked `IN (...)`
   against the library; `checked_ids` preserves collection order, not sorted.
+- `design_count` is MakerWorld's `designCnt`, which still counts designs
+  removed or hidden since they were added; the designs pager only returns
+  visible ones. The read path reports the gap as `hidden_count` (only when
+  the id list is complete, i.e. below the 1000-id cap) and judges "all
+  downloaded" against `available_count` — those designs can't be fetched.
 - Refreshed hourly by the scheduler (deadline backdated from cache age at
   boot, so restarting a fresh container causes **zero** MakerWorld requests)
   or manually via `POST /api/my-collections/refresh`.

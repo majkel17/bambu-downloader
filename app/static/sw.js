@@ -4,7 +4,7 @@
    otherwise installed PWAs keep serving the old shell forever
    (caches.match returns the first cached copy, and there was no update
    path — that bit us once already). */
-const CACHE_VERSION = 'v14';
+const CACHE_VERSION = 'v15';
 const CACHE = `bambu-dl-${CACHE_VERSION}`;
 const SHELL = ['/', '/static/app.js', '/manifest.webmanifest'];
 
