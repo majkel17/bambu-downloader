@@ -25,12 +25,12 @@ services:
       # Read-only key (GET endpoints only) for dashboards like Home Assistant:
       # - BND_READ_API_KEY=change-me-too
       # Seconds between downloads inside a collection sync (anti rate-limit):
-      # - BND_DOWNLOAD_DELAY_SECONDS=3
+      - BND_DOWNLOAD_DELAY_SECONDS=10
       # How often the scheduler checks for due collections:
       # - BND_SCHEDULER_INTERVAL_SECONDS=300
       # Stop retrying a model in syncs after this many failures caused by the
       # model itself (removed / private / censored); 0 = retry forever:
-      # - BND_MAX_DOWNLOAD_ATTEMPTS=3
+      - BND_MAX_DOWNLOAD_ATTEMPTS=2
       # Activity-log retention (days / max entries; 0 = unlimited):
-      # - BND_EVENT_RETENTION_DAYS=30
-      # - BND_EVENT_MAX_ROWS=5000
+      - BND_EVENT_RETENTION_DAYS=14
+      - BND_EVENT_MAX_ROWS=2500
