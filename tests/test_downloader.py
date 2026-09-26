@@ -8,6 +8,11 @@ from __future__ import annotations
 
 import pytest
 
+# Exception classes are resolved through app.downloader at call time: the
+# app_client fixture importlib.reload()s the app modules (downloader before
+# makerworld), so classes imported here at collection time may no longer be
+# the ones the downloader raises once any route test has run.
+import app.downloader as dl
 from app.downloader import (
     DownloadManager,
     _safe_filename,
@@ -15,7 +20,6 @@ from app.downloader import (
     add_event,
     recent_events,
 )
-from app.makerworld import AuthRequiredError
 
 
 # ------------------------------------------------------------------ helpers
@@ -132,7 +136,7 @@ async def test_resolve_design_reports_already_downloaded(db):
 @pytest.mark.asyncio
 async def test_refresh_my_collections_requires_token(db):
     manager = DownloadManager(db)
-    with pytest.raises(AuthRequiredError):
+    with pytest.raises(dl.AuthRequiredError):
         await manager.refresh_my_collections()
 
 
@@ -196,9 +200,7 @@ async def test_sync_collection_records_progress(db):
 @pytest.mark.asyncio
 async def test_sync_collection_unknown_collection(db):
     manager = DownloadManager(db)
-    from app.makerworld import MakerWorldError
-
-    with pytest.raises(MakerWorldError):
+    with pytest.raises(dl.MakerWorldError):
         await manager.sync_collection(999)
 
 

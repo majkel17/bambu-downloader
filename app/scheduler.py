@@ -15,6 +15,9 @@ from .makerworld import AuthRequiredError, CaptchaError, MakerWorldError
 
 logger = logging.getLogger(__name__)
 
+# Floor for the own-collections refresh interval (anti-abuse politeness).
+MIN_MINE_REFRESH_MINUTES = 15
+
 
 class SyncScheduler:
     """Polls due collections and syncs them, one at a time."""
@@ -67,32 +70,28 @@ class SyncScheduler:
         propagated so shutdown stays prompt.
         """
         logger.info("Collection sync scheduler started")
-        # First refresh due immediately — UNLESS the cache is already fresh
-        # (e.g. a quick container restart): then backdate the deadline so the
-        # restart itself causes no MakerWorld request at all.
-        refresh_ms = settings.my_collections_refresh_minutes * 60
-        fetched_at = self.db.remote_collections_fetched_at()
-        if fetched_at:
-            try:
-                age = (
-                    datetime.now(timezone.utc) - datetime.fromisoformat(fetched_at)
-                ).total_seconds()
-                self._next_mine_refresh = time.monotonic() + max(0.0, refresh_ms - age)
-            except (ValueError, TypeError):
-                self._next_mine_refresh = 0.0
-        else:
-            self._next_mine_refresh = 0.0
+        self.reschedule_mine_refresh()
         while self._running:
             try:
                 if time.monotonic() >= self._next_prune:
                     self._prune_events()
                     self._next_prune = time.monotonic() + 3600
-                if time.monotonic() >= self._next_mine_refresh:
+                # Signed out: leave the deadline alone so the first tick
+                # after sign-in fetches the (cleared) listing right away.
+                if time.monotonic() >= self._next_mine_refresh and self.db.get_meta(
+                    "bambu_token"
+                ):
                     await self._refresh_my_collections()
                     self._next_mine_refresh = (
-                        time.monotonic() + settings.my_collections_refresh_minutes * 60
+                        time.monotonic() + self.mine_refresh_minutes() * 60
                     )
-                due = self.db.due_collections(utcnow())
+                # Signed out: no collection syncs at all — every download
+                # needs the token, so a sync would only spend requests on
+                # listings. Due collections stay due and run after sign-in.
+                if not self.db.get_meta("bambu_token"):
+                    due = []
+                else:
+                    due = self.db.due_collections(utcnow())
                 for coll in due:
                     cid = coll["collection_id"]
                     if not self._running:
@@ -142,6 +141,38 @@ class SyncScheduler:
                 logger.exception("Scheduler iteration failed")
             # Poll interval is configurable; a small floor avoids busy-looping.
             await asyncio.sleep(settings.scheduler_interval_seconds)
+
+    def mine_refresh_minutes(self) -> int:
+        """Own-collections refresh interval: the UI setting (meta) if set,
+        else BND_MY_COLLECTIONS_REFRESH_MINUTES; never under 15 minutes."""
+        try:
+            stored = int(self.db.get_meta("my_collections_refresh_minutes") or 0)
+        except ValueError:
+            stored = 0
+        return max(
+            MIN_MINE_REFRESH_MINUTES, stored or settings.my_collections_refresh_minutes
+        )
+
+    def reschedule_mine_refresh(self) -> None:
+        """Set the next own-collections refresh from the cache's age.
+
+        Due immediately when never fetched — UNLESS the cache is fresh (e.g.
+        a quick container restart or an interval change): then the deadline
+        is backdated so the event itself causes no MakerWorld request.
+        """
+        fetched_at = self.db.remote_collections_fetched_at()
+        if not fetched_at:
+            self._next_mine_refresh = 0.0
+            return
+        try:
+            age = (
+                datetime.now(timezone.utc) - datetime.fromisoformat(fetched_at)
+            ).total_seconds()
+        except (ValueError, TypeError):
+            self._next_mine_refresh = 0.0
+            return
+        remaining = self.mine_refresh_minutes() * 60 - age
+        self._next_mine_refresh = time.monotonic() + max(0.0, remaining)
 
     def _prune_events(self) -> None:
         """Apply the activity-log retention (BND_EVENT_RETENTION_DAYS /

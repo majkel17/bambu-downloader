@@ -26,6 +26,9 @@ services:
       # - BND_READ_API_KEY=change-me-too
       # Seconds between downloads inside a collection sync (anti rate-limit):
       - BND_DOWNLOAD_DELAY_SECONDS=10
+      # Default refresh of "Your MakerWorld collections" (minutes, min 15;
+      # the Collections tab can change it later):
+      # - BND_MY_COLLECTIONS_REFRESH_MINUTES=60
       # How often the scheduler checks for due collections:
       # - BND_SCHEDULER_INTERVAL_SECONDS=300
       # Stop retrying a model in syncs after this many failures caused by the

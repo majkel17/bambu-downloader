@@ -137,8 +137,12 @@ A **cache only**, rewritten wholesale by `refresh_my_collections()` from the
 - `design_ids` is a JSON array of ints, filled from the per-collection pager
   (capped: 100/page, `CAP_MAX_PAGES = 10`); slugs come from one extra
   `withoutdesign` request per collection.
-- Rows are never deleted — a collection that vanishes on MakerWorld just
-  disappears from the cache view; nothing here touches `collections`.
+- Rows are never deleted by a refresh — a collection that vanishes on
+  MakerWorld just disappears from the cache view; nothing here touches
+  `collections`. Signing out clears the whole table (it's that account's).
+- Refresh interval: `meta.my_collections_refresh_minutes` (set from the UI)
+  or `BND_MY_COLLECTIONS_REFRESH_MINUTES`, floor 15 min. Signed out, neither
+  this refresh nor collection syncs run.
 - Read paths compute download checkmarks at query time by chunked `IN (...)`
   against the library; `checked_ids` preserves collection order, not sorted.
 - Refreshed hourly by the scheduler (deadline backdated from cache age at
@@ -165,9 +169,14 @@ One row per design that failed in a collection sync **because of the model
 itself**: `NotFoundError`, `ForbiddenError` or `ModelUnavailableError` (no
 download URL). Network errors, CAPTCHA, auth and disk space never count.
 
+- `reason`: `no_profile` (`NoProfileError`: no plate instances and the
+  legacy design-level endpoint refused — an STL/CAD-only design),
+  `not_found`, `forbidden` or `no_download_url`; rows from before the column
+  existed have NULL.
 - `attempts` is bumped per failed sync; at `BND_MAX_DOWNLOAD_ATTEMPTS`
   (default 3, `0` = never skip) syncs skip the design and one Activity event
-  says so. In all-plates mode the design's remaining plates are skipped too.
+  says so. `no_profile` is skipped after the first failure (retrying can't
+  change it). In all-plates mode the design's remaining plates are skipped too.
 - Cleared on a successful download (a manual download by URL ignores the
   skip) or via `POST /api/skipped-models/{design_id}/retry`.
 

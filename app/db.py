@@ -66,11 +66,14 @@ CREATE TABLE IF NOT EXISTS collections (
 -- Per-design failure counter for collection syncs. Only failures caused by
 -- the model itself (removed, private, no download URL) are counted; a row
 -- reaching BND_MAX_DOWNLOAD_ATTEMPTS makes syncs skip the design. Cleared
--- when the design downloads successfully or the user hits Retry.
+-- when the design downloads successfully or the user hits Retry. reason is
+-- a short code (no_profile / not_found / forbidden / no_download_url); a
+-- no_profile design is skipped after its first failure.
 CREATE TABLE IF NOT EXISTS download_failures (
     design_id INTEGER PRIMARY KEY,
     collection_id INTEGER,
     attempts INTEGER NOT NULL DEFAULT 0,
+    reason TEXT,
     last_error TEXT,
     last_attempt_at TEXT NOT NULL
 );
@@ -98,6 +101,11 @@ CREATE TABLE IF NOT EXISTS remote_collections (
 );
 """
 
+
+# When a download_failures row makes syncs skip its design: enough attempts,
+# or a reason that retrying can't fix (no print profile). Bound to
+# (max_attempts, max_attempts); max_attempts 0 disables skipping entirely.
+_SKIPPED_SQL = "(? > 0 AND (attempts >= ? OR reason = 'no_profile'))"
 
 # Label shown for models downloaded directly by URL (not via a collection).
 MANUAL_DOWNLOAD_LABEL = "Manual download"
@@ -147,6 +155,7 @@ class Database:
                 "ALTER TABLE models ADD COLUMN creator TEXT",
                 "ALTER TABLE collections ADD COLUMN plates_mode TEXT NOT NULL DEFAULT 'default'",
                 # Collection size / designs in the library, as of the last sync.
+                "ALTER TABLE download_failures ADD COLUMN reason TEXT",
                 "ALTER TABLE collections ADD COLUMN last_sync_total INTEGER",
                 "ALTER TABLE collections ADD COLUMN last_sync_present INTEGER",
                 # Hot-path indexes (no-op when they exist). cover: looked up
@@ -364,20 +373,25 @@ class Database:
 
     # ---- download failures (skip after N attempts) ----
     def record_failure(
-        self, design_id: int, collection_id: int | None, error: str
+        self,
+        design_id: int,
+        collection_id: int | None,
+        error: str,
+        reason: str | None = None,
     ) -> int:
         """Count one failed attempt for a design; returns the new total."""
         with self.connect() as conn:
             conn.execute(
                 """INSERT INTO download_failures(design_id, collection_id, attempts,
-                       last_error, last_attempt_at)
-                   VALUES(?, ?, 1, ?, ?)
+                       reason, last_error, last_attempt_at)
+                   VALUES(?, ?, 1, ?, ?, ?)
                    ON CONFLICT(design_id) DO UPDATE SET
                      attempts = attempts + 1,
                      collection_id = COALESCE(excluded.collection_id, collection_id),
+                     reason = excluded.reason,
                      last_error = excluded.last_error,
                      last_attempt_at = excluded.last_attempt_at""",
-                (design_id, collection_id, error, utcnow()),
+                (design_id, collection_id, reason, error, utcnow()),
             )
             row = conn.execute(
                 "SELECT attempts FROM download_failures WHERE design_id = ?",
@@ -394,32 +408,28 @@ class Database:
             return cur.rowcount > 0
 
     def skipped_design_ids(self, max_attempts: int) -> set[int]:
-        """Designs syncs should skip (attempts >= max_attempts; 0 = none)."""
-        if max_attempts <= 0:
-            return set()
+        """Designs syncs should skip (see _SKIPPED_SQL; 0 = none)."""
         with self.connect() as conn:
             return {
                 int(r["design_id"])
                 for r in conn.execute(
-                    "SELECT design_id FROM download_failures WHERE attempts >= ?",
-                    (max_attempts,),
+                    f"SELECT design_id FROM download_failures WHERE {_SKIPPED_SQL}",
+                    (max_attempts, max_attempts),
                 )
             }
 
     def skipped_models(self, max_attempts: int) -> list[dict[str, Any]]:
         """Skipped designs with their last error and collection title."""
-        if max_attempts <= 0:
-            return []
         with self.connect() as conn:
             return [
                 dict(r)
                 for r in conn.execute(
-                    """SELECT f.*, c.title AS collection_title
+                    f"""SELECT f.*, c.title AS collection_title
                        FROM download_failures f
                        LEFT JOIN collections c ON c.collection_id = f.collection_id
-                       WHERE f.attempts >= ?
+                       WHERE {_SKIPPED_SQL}
                        ORDER BY f.last_attempt_at DESC""",
-                    (max_attempts,),
+                    (max_attempts, max_attempts),
                 )
             ]
 
@@ -724,12 +734,12 @@ class Database:
         """Per-collection progress for dashboards (Home Assistant etc.)."""
         with self.connect() as conn:
             rows = conn.execute(
-                """SELECT c.collection_id, c.title, c.enabled, c.last_sync_at,
+                f"""SELECT c.collection_id, c.title, c.enabled, c.last_sync_at,
                           c.last_sync_status, c.last_sync_new,
                           c.last_sync_total AS total, c.last_sync_present AS present,
                           (SELECT COUNT(*) FROM download_failures f
                             WHERE f.collection_id = c.collection_id
-                              AND ? > 0 AND f.attempts >= ?) AS skipped
+                              AND {_SKIPPED_SQL}) AS skipped
                    FROM collections c ORDER BY c.created_at DESC""",
                 (max_attempts, max_attempts),
             ).fetchall()
@@ -895,6 +905,11 @@ class Database:
                 )
                 out.append(item)
             return out
+
+    def clear_remote_collections(self) -> None:
+        """Drop the own-collections cache (on sign-out: it's that account's)."""
+        with self.connect() as conn:
+            conn.execute("DELETE FROM remote_collections")
 
     def remote_collections_fetched_at(self) -> str | None:
         """When the cache was last refreshed (None = never)."""
