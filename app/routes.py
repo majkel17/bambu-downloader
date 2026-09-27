@@ -470,6 +470,10 @@ async def my_collections() -> dict[str, Any]:
         "fetched_at": db.remote_collections_fetched_at(),
         "authenticated": bool(db.get_meta("bambu_token")),
         "refresh_minutes": scheduler.mine_refresh_minutes(),
+        "refreshing": (manager.mine_progress or {"done": 0, "total": 0})
+        if manager.mine_refreshing
+        else None,
+        "refresh_error": manager.mine_error,
     }
 
 
@@ -497,25 +501,18 @@ async def my_collections_settings(req: MyCollectionsSettings) -> dict[str, Any]:
     return {"refresh_minutes": scheduler.mine_refresh_minutes()}
 
 
-@router.post("/my-collections/refresh")
+@router.post("/my-collections/refresh", status_code=202)
 async def refresh_my_collections_now() -> dict[str, Any]:
-    """Re-fetch the own-collections listing from MakerWorld right now.
+    """Start re-fetching the own-collections listing in the background.
 
-    Normally the scheduler refreshes it hourly; this exists for the "Refresh"
-    button. 401 when signed out, 429 on a CAPTCHA challenge (the listing
-    endpoint is subject to the same anti-abuse layer as everything else).
+    Normally the scheduler refreshes it periodically; this backs the
+    "Refresh" button. Returns at once — the UI polls GET /my-collections
+    for `refreshing` progress and `refresh_error`. `started` is false when
+    a refresh is already running. 401 when signed out.
     """
     if not db.get_meta("bambu_token"):
         raise HTTPException(status_code=401, detail="Sign in to MakerWorld first")
-    try:
-        result = await manager.refresh_my_collections()
-    except AuthRequiredError as e:
-        raise HTTPException(status_code=401, detail=str(e)) from e
-    except CaptchaError as e:
-        raise HTTPException(status_code=429, detail=str(e)) from e
-    except MakerWorldError as e:
-        raise HTTPException(status_code=502, detail=str(e)) from e
-    return result
+    return {"started": manager.start_mine_refresh()}
 
 
 @router.post("/collections")

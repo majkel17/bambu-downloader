@@ -41,7 +41,8 @@ the container's 8080 — change `ports:` if you prefer another one), go to
   so the bind-mounted `downloads/` and `data/` are writable.
 - **Docker:** leave it commented and make the dirs writable for the
   container's uid 1000: `mkdir -p data downloads && sudo chown -R 1000:1000 data downloads`.
-- Models land in `./downloads/<collection>/<design-id>-<title>/` next to a
+- Models land in `./downloads/<collection-id>-<title>/<design-id>-<title>/` (the
+  collection folder follows a rename on MakerWorld) next to a
   `cover.webp`; state (including your Bambu token) lives in `./data/`.
 - Updating: `git pull && docker compose up -d --build`. Schema migrations run
   automatically on start, and the DB is copied to `data/backup/` first.
