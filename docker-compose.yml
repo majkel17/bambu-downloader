@@ -34,6 +34,8 @@ services:
       # Stop retrying a model in syncs after this many failures caused by the
       # model itself (removed / private / censored); 0 = retry forever:
       - BND_MAX_DOWNLOAD_ATTEMPTS=2
+      # How long Library → Profiles reuses a model's profile list (minutes):
+      # - BND_PROFILES_CACHE_MINUTES=15
       # Activity-log retention (days / max entries; 0 = unlimited):
       - BND_EVENT_RETENTION_DAYS=14
       - BND_EVENT_MAX_ROWS=2500

@@ -48,7 +48,8 @@ function wireEvents() {
   // Delegated clicks for lists rendered as innerHTML (survive re-renders).
   for (const [containerId, names] of [
     ['labelChips', ['set-lib-filter']],
-    ['modelGrid', ['download-file']],
+    ['modelGrid', ['download-file', 'show-profiles']],
+    ['profilesList', ['download-profile']],
     ['skippedList', ['retry-skipped']],
     ['mineList', ['follow-mine']],
     ['collList', ['sync-now', 'coll-toggle', 'coll-remove']],
@@ -72,6 +73,10 @@ function wireEvents() {
       if (ev.target.matches('.interval select')) setPlatesMode(cid, ev.target.value);
     });
   }
+  const profilesModal = document.getElementById('profilesModal');
+  if (profilesModal) profilesModal.addEventListener('click', (ev) => {
+    if (ev.target === ev.currentTarget) closeProfiles();
+  });
   const removeModal = document.getElementById('removeModal');
   if (removeModal) removeModal.addEventListener('click', (ev) => {
     if (ev.target === ev.currentTarget) closeRemoveModal();  // backdrop click
@@ -88,6 +93,9 @@ function handleAction(action, el) {
     'load-more': () => loadMoreModels(),
     'set-lib-filter': () => setLibFilter(el.dataset.label),
     'download-file': () => downloadFile(el.dataset.id, el.dataset.name, el),
+    'show-profiles': () => showProfiles(el.dataset.did),
+    'download-profile': () => downloadProfile(el.dataset.did, el.dataset.pid, el),
+    'profiles-close': () => closeProfiles(),
     'add-collection': () => addCollection(),
     'refresh-mine': () => refreshMyCollections(),
     'follow-mine': () => followMine(el.dataset.cid, el.dataset.slug),
@@ -347,7 +355,8 @@ function modelCard(m) {
     <div class="meta sub">
       ${creator ? `<div class="creator">${creator}</div>` : ''}
       ${date ? `<div class="date">${date}</div>` : ''}
-      design #${m.design_id}${m.profile_id ? ' · plate #' + m.profile_id : ''}<br>
+      ${m.profile_title ? `<div class="profile" title="Print profile">⚙ ${esc(m.profile_title)}</div>` : ''}
+      design #${m.design_id}${m.profile_id ? ' · profile #' + m.profile_id : ''}<br>
       ${fmtBytes(m.file_size)} · <span title="${esc(m.file_path)}">${esc(m.filename)}</span>
     </div>
     <div class="meta labels">
@@ -355,9 +364,64 @@ function modelCard(m) {
     </div>
     <div class="meta actions">
       <button class="ghost" data-action="download-file" data-id="${m.id}" data-name="${esc(m.filename)}">⬇ Download</button>
+      <button class="ghost" data-action="show-profiles" data-did="${m.design_id}" title="Other print profiles of this model">⚙ Profiles</button>
       <a class="mw-link" href="${esc(mwUrl)}" target="_blank" rel="noopener noreferrer">↗ MakerWorld</a>
     </div>
   </div>`;
+}
+
+// ------------------------------------------------------------ profiles
+// A design's print profiles (one MakerWorld request, cached server-side).
+async function showProfiles(did) {
+  const list = document.getElementById('profilesList');
+  document.getElementById('profilesTitle').textContent = 'Profiles';
+  document.getElementById('profilesMeta').textContent = 'Loading…';
+  list.innerHTML = '';
+  document.getElementById('profilesModal').hidden = false;
+  try {
+    renderProfiles(await api(`/api/models/${did}/profiles`));
+  } catch (e) {
+    document.getElementById('profilesMeta').textContent = e.message;
+  }
+}
+
+function renderProfiles(r) {
+  document.getElementById('profilesTitle').textContent = r.title;
+  const n = r.profiles.length;
+  const have = r.profiles.filter(p => p.downloaded).length;
+  document.getElementById('profilesMeta').textContent =
+    `${n} profile${n === 1 ? '' : 's'} on MakerWorld · ${have} downloaded` +
+    (r.fetched_at ? ` · checked ${fmtTime(new Date(r.fetched_at).getTime() / 1000)}` : '');
+  document.getElementById('profilesList').innerHTML = r.profiles.map(p => `
+    <div class="profile-row">
+      <div class="name">
+        <a href="${esc(p.url)}" target="_blank" rel="noopener noreferrer">${esc(p.title)}</a>
+        <div class="by">by ${esc(p.creator || 'unknown')}
+          ${p.community ? '<span class="tag warn" title="Published by someone other than the model\'s author">community</span>' : ''}</div>
+      </div>
+      ${p.downloaded
+        ? '<span class="tag ok">✓ downloaded</span>'
+        : `<button class="ghost" data-action="download-profile" data-did="${r.design_id}" data-pid="${p.profile_id}">⬇ Download</button>`}
+    </div>`).join('') || '<div class="empty">MakerWorld lists no print profiles for this model.</div>';
+}
+
+async function downloadProfile(did, pid, btn) {
+  btn.disabled = true;
+  btn.textContent = 'Downloading…';
+  try {
+    const r = await api(`/api/models/${did}/profiles/${pid}/download`, { method: 'POST' });
+    toast(r.status === 'exists' ? 'Already in your library' : 'Profile downloaded', 'ok');
+    renderProfiles(await api(`/api/models/${did}/profiles`));  // cached: no MakerWorld request
+    loadModels();
+  } catch (e) {
+    toast(e.message, 'err');
+    btn.disabled = false;
+    btn.textContent = '⬇ Download';
+  }
+}
+
+function closeProfiles() {
+  document.getElementById('profilesModal').hidden = true;
 }
 
 // Save a stored model file to the user's device. Without an API key a plain
@@ -612,9 +676,10 @@ async function loadCollections() {
           <input type="number" value="${c.sync_interval_minutes}" min="15" step="15"> min
         </span>
         <span class="interval">
-          <select title="Which plates to download on sync">
-            <option value="default" ${c.plates_mode !== 'all' ? 'selected' : ''}>default plate</option>
-            <option value="all" ${c.plates_mode === 'all' ? 'selected' : ''}>all plates</option>
+          <select title="Which print profiles to download on sync">
+            <option value="default" ${!['all', 'author'].includes(c.plates_mode) ? 'selected' : ''}>default profile</option>
+            <option value="author" ${c.plates_mode === 'author' ? 'selected' : ''}>author's profiles</option>
+            <option value="all" ${c.plates_mode === 'all' ? 'selected' : ''}>all profiles (incl. community)</option>
           </select>
         </span>
         <button class="ghost" data-action="sync-now" data-cid="${c.collection_id}">Sync now</button>
@@ -651,7 +716,8 @@ async function setInterval_(cid, minutes) {
 async function setPlatesMode(cid, mode) {
   try {
     await api(`/api/collections/${cid}`, { method: 'PATCH', body: { plates_mode: mode } });
-    toast(mode === 'all' ? 'Sync will download every plate' : 'Sync will download the default plate', 'ok');
+    const what = { all: 'every profile, incl. community ones', author: "every profile by the model's author" };
+    toast(`Sync will download ${what[mode] || 'the default profile'}`, 'ok');
   } catch (e) { toast(e.message, 'err'); }
 }
 

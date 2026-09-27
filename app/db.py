@@ -106,6 +106,10 @@ CREATE TABLE IF NOT EXISTS remote_collections (
 # (makerworld.list_my_collections' max_designs_per_collection default).
 CAP_DESIGN_IDS = 1000
 
+# Collection sync modes (column name predates "profiles": a MakerWorld print
+# profile is what the code calls a plate).
+PLATES_MODES = ("default", "author", "all")
+
 # When a download_failures row makes syncs skip its design: enough attempts,
 # or a reason that retrying can't fix (no print profile). Bound to
 # (max_attempts, max_attempts); max_attempts 0 disables skipping entirely.
@@ -162,6 +166,8 @@ class Database:
                 "ALTER TABLE download_failures ADD COLUMN reason TEXT",
                 "ALTER TABLE collections ADD COLUMN last_sync_total INTEGER",
                 "ALTER TABLE collections ADD COLUMN last_sync_present INTEGER",
+                # The print profile's own name ("Ghost + Stand (No AMS)").
+                "ALTER TABLE models ADD COLUMN profile_title TEXT",
                 # Hot-path indexes (no-op when they exist). cover: looked up
                 # by every /thumb request; created_at: list_models' default
                 # sort; collection_id: the label/collection filters.
@@ -307,6 +313,7 @@ class Database:
         cover_url: str | None = None,
         collection_title: str | None = None,
         creator: str | None = None,
+        profile_title: str | None = None,
     ) -> int:
         """Insert a downloaded model, or refresh an existing (design, profile) row.
 
@@ -320,8 +327,8 @@ class Database:
             cur = conn.execute(
                 """INSERT INTO models(design_id, profile_id, collection_id, title, slug, url,
                    cover_url, collection_title, creator, filename, file_path, file_size,
-                   status, error, created_at, updated_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   status, error, created_at, updated_at, profile_title)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(design_id, COALESCE(profile_id, -1)) DO UPDATE SET
                      filename=excluded.filename,
                      file_path=excluded.file_path, file_size=excluded.file_size,
@@ -329,6 +336,7 @@ class Database:
                      cover_url=COALESCE(excluded.cover_url, models.cover_url),
                      collection_title=COALESCE(excluded.collection_title, models.collection_title),
                      creator=COALESCE(excluded.creator, models.creator),
+                     profile_title=COALESCE(excluded.profile_title, models.profile_title),
                      updated_at=excluded.updated_at""",
                 (
                     design_id,
@@ -347,9 +355,21 @@ class Database:
                     error,
                     now,
                     now,
+                    profile_title,
                 ),
             )
             return cur.lastrowid or 0
+
+    def design_rows(self, design_id: int) -> list[dict[str, Any]]:
+        """Every library row of a design (one per downloaded profile)."""
+        with self.connect() as conn:
+            return [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT * FROM models WHERE design_id = ? ORDER BY id",
+                    (design_id,),
+                )
+            ]
 
     def get_model(self, model_row_id: int) -> dict[str, Any] | None:
         """Fetch one model row by its primary key."""
@@ -711,9 +731,10 @@ class Database:
             )
 
     def set_collection_plates_mode(self, collection_id: int, mode: str) -> None:
-        """Set a collection's plate-download mode: 'default' (first plate of
-        each design) or 'all' (every plate, deduped per design+plate)."""
-        if mode not in ("default", "all"):
+        """Set a collection's profile-download mode: 'default' (first profile
+        of each design), 'author' (every profile by the design's author) or
+        'all' (every profile incl. community ones), deduped per design+profile."""
+        if mode not in PLATES_MODES:
             raise ValueError(f"Invalid plates mode: {mode!r}")
         with self.connect() as conn:
             conn.execute(
