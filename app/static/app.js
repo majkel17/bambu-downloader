@@ -371,17 +371,24 @@ function modelCard(m) {
 }
 
 // ------------------------------------------------------------ profiles
+// Profile downloads in flight ("designId:profileId"): every re-render of the
+// list keeps them as "Downloading…" — one finishing must not reset another.
+const profileDownloads = new Set();
+
 // A design's print profiles (one MakerWorld request, cached server-side).
 async function showProfiles(did) {
   const list = document.getElementById('profilesList');
   document.getElementById('profilesTitle').textContent = 'Profiles';
   document.getElementById('profilesMeta').textContent = 'Loading…';
   list.innerHTML = '';
-  document.getElementById('profilesModal').hidden = false;
+  const modal = document.getElementById('profilesModal');
+  modal.dataset.did = String(did);
+  modal.hidden = false;
   try {
-    renderProfiles(await api(`/api/models/${did}/profiles`));
+    const r = await api(`/api/models/${did}/profiles`);
+    if (modal.dataset.did === String(did)) renderProfiles(r);  // not switched meanwhile
   } catch (e) {
-    document.getElementById('profilesMeta').textContent = e.message;
+    if (modal.dataset.did === String(did)) document.getElementById('profilesMeta').textContent = e.message;
   }
 }
 
@@ -401,22 +408,32 @@ function renderProfiles(r) {
       </div>
       ${p.downloaded
         ? '<span class="tag ok">✓ downloaded</span>'
-        : `<button class="ghost" data-action="download-profile" data-did="${r.design_id}" data-pid="${p.profile_id}">⬇ Download</button>`}
+        : profileDownloads.has(`${r.design_id}:${p.profile_id}`)
+          ? '<button class="ghost" disabled>Downloading…</button>'
+          : `<button class="ghost" data-action="download-profile" data-did="${r.design_id}" data-pid="${p.profile_id}">⬇ Download</button>`}
     </div>`).join('') || '<div class="empty">MakerWorld lists no print profiles for this model.</div>';
 }
 
 async function downloadProfile(did, pid, btn) {
+  const key = `${did}:${pid}`;
+  if (profileDownloads.has(key)) return;
+  profileDownloads.add(key);
   btn.disabled = true;
   btn.textContent = 'Downloading…';
   try {
     const r = await api(`/api/models/${did}/profiles/${pid}/download`, { method: 'POST' });
     toast(r.status === 'exists' ? 'Already in your library' : 'Profile downloaded', 'ok');
-    renderProfiles(await api(`/api/models/${did}/profiles`));  // cached: no MakerWorld request
     loadModels();
   } catch (e) {
     toast(e.message, 'err');
-    btn.disabled = false;
-    btn.textContent = '⬇ Download';
+  } finally {
+    profileDownloads.delete(key);
+  }
+  // Re-render from the (cached, no MakerWorld request) list — only while
+  // the dialog still shows this model.
+  const modal = document.getElementById('profilesModal');
+  if (!modal.hidden && modal.dataset.did === String(did)) {
+    try { renderProfiles(await api(`/api/models/${did}/profiles`)); } catch (e) { /* keep the list */ }
   }
 }
 
