@@ -83,6 +83,7 @@ import time in `app/config.py`).
 | `BND_SCHEDULER_INTERVAL_SECONDS` | `300` (floor 15) | How often the scheduler wakes to check due collections |
 | `BND_DOWNLOAD_DELAY_SECONDS` | `3` | Gap between downloads / paging / backfill requests — the main anti-418 lever (0 disables) |
 | `BND_MY_COLLECTIONS_REFRESH_MINUTES` | `60` (floor 15) | Own-collections cache refresh cadence |
+| `BND_PROFILES_CACHE_MINUTES` | `15` | Library → Profiles reuses a design's profile list this long (in memory; 0 = always ask) |
 
 ### Safety & security
 
@@ -104,6 +105,7 @@ sensitive; the API-key gate exists because of this.
 | `GET /api/status` | Scheduler state, in-flight syncs, queue snapshot, token validity (tri-state) |
 | `POST /api/auth/login` / `verify` / `token` / `logout` | Account flows (password → email code / TOTP; token paste fallback) |
 | `POST /api/download`, `POST /api/resolve` | Download a URL / preview metadata+plates |
+| `GET /api/models/{design_id}/profiles`, `POST /api/models/{design_id}/profiles/{profile_id}/download` | A library design's print profiles (name, author, `community`, `downloaded`) / download one next to the existing file. Takes the MakerWorld design id |
 | `GET /api/models`, `/api/model-labels`, `/api/events` | Library grid (`?q=` server-side search), origin-label filter bar, activity log (SQLite, `?kind=download\|sync\|error`) |
 | `GET /api/models/{id}/file` | Download a stored model file (attachment; only paths inside the downloads root) |
 | `GET /api/collections`, `POST /api/collections`, `PATCH/DELETE /api/collections/{id}` | Follow / configure / unfollow (optional file deletion); the list carries `next_sync_at` and `syncing` |

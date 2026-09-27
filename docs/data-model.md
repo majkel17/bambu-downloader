@@ -50,7 +50,7 @@ erDiagram
         text url
         int sync_interval_minutes "default 360"
         int enabled "1/0 pause"
-        text plates_mode "default|all"
+        text plates_mode "default|author|all"
         text last_sync_at
         text last_sync_status "ok|partial|error|auth-required|captcha"
         int last_sync_new
@@ -85,6 +85,8 @@ One row per downloaded `(design_id, profile_id)` pair.
   NULL means a manual, single-URL download.
 - `collection_title` is a **snapshot** taken at download time so the Library's
   origin label survives unfollowing or renaming the collection.
+- `profile_title` is the print profile's own name ("Ghost + Stand (No
+  AMS)"), shown in the Library; NULL for rows from before the column.
 - `cover_url` doubles as the `/thumb` lookup key
   (`find_model_path_by_cover`) and drives the backfill scan.
 
@@ -126,8 +128,11 @@ WHERE enabled = 1 AND (
 
 `record_sync()` stamps `last_sync_at / last_sync_status / last_sync_new` —
 writing `last_sync_at` is itself what schedules the next attempt.
-`plates_mode` is `default` (first plate per design) or `all` (enumerate every
-plate, dedup per design+plate).
+`plates_mode` (the name predates "profiles": a MakerWorld print profile is a
+"plate" in the code) is `default` (first profile per design), `author`
+(every profile whose creator is the design's author — community profiles
+skipped) or `all` (every profile), deduped per design+profile. The extra
+profiles are enumerated from the second sync of a design on.
 
 ### `remote_collections` — own-collection cache
 

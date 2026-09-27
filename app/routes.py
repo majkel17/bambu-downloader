@@ -126,7 +126,7 @@ class CollectionUpdateRequest(BaseModel):
 
     sync_interval_minutes: int | None = None
     enabled: bool | None = None
-    plates_mode: str | None = None  # 'default' | 'all'
+    plates_mode: str | None = None  # 'default' | 'author' | 'all'
 
 
 # ------------------------------------------------------------------ status
@@ -331,6 +331,41 @@ async def download(req: DownloadRequest) -> dict[str, Any]:
     except MakerWorldError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     return result
+
+
+def _model_error(e: MakerWorldError) -> HTTPException:
+    """Same code mapping as /download."""
+    for cls, code in (
+        (AuthRequiredError, 401),
+        (NotFoundError, 404),
+        (ForbiddenError, 403),
+        (CaptchaError, 429),
+    ):
+        if isinstance(e, cls):
+            return HTTPException(status_code=code, detail=str(e))
+    return HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/models/{design_id}/profiles")
+async def design_profiles(design_id: int) -> dict[str, Any]:
+    """Print profiles of a design in the library (Library → Profiles).
+
+    One MakerWorld request, then cached for BND_PROFILES_CACHE_MINUTES.
+    Note the path takes the MakerWorld design id, not a library row id.
+    """
+    try:
+        return await manager.design_profiles(design_id)
+    except MakerWorldError as e:
+        raise _model_error(e) from e
+
+
+@router.post("/models/{design_id}/profiles/{profile_id}/download")
+async def download_design_profile(design_id: int, profile_id: int) -> dict[str, Any]:
+    """Download another profile of a library design into the same folder."""
+    try:
+        return await manager.download_profile(design_id, profile_id)
+    except MakerWorldError as e:
+        raise _model_error(e) from e
 
 
 @router.post("/resolve")
@@ -560,9 +595,9 @@ async def update_collection(
 ) -> dict[str, Any]:
     """Update a followed collection's interval, paused state, or plates mode.
 
-    plates_mode 'default' downloads the first plate of each design; 'all'
-    enumerates every plate per design and downloads missing ones (deduped
-    per design+plate). Invalid modes are rejected client-side too, but a
+    plates_mode 'default' downloads the first profile of each design;
+    'author' every profile by the design's author, 'all' every profile incl.
+    community ones — missing ones only (deduped per design+profile). Invalid modes are rejected client-side too, but a
     400 here keeps the API honest.
     """
     if not db.get_collection(collection_id):

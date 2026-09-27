@@ -13,6 +13,7 @@ import time
 import zipfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -136,6 +137,27 @@ def _slugify(text: str) -> str:
     return re.sub(r"[\s_-]+", "-", text)[:80] or "untitled"
 
 
+def _instance_profile_id(inst: dict[str, Any]) -> int:
+    """The id a #profileId-N fragment (and models.profile_id) uses."""
+    return int(inst.get("profileId") or 0) or int(inst.get("id") or 0)
+
+
+def _authors_instances(
+    hit: dict[str, Any], instances: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Only the profiles published by the design's own author ('author'
+    sync mode). The listing hit names the author; without it the first
+    profile's creator stands in (MakerWorld lists the author's first)."""
+    author_uid = (hit.get("designCreator") or {}).get("uid")
+    if author_uid is None and instances:
+        author_uid = (instances[0].get("creator") or {}).get("uid")
+    return [i for i in instances if (i.get("creator") or {}).get("uid") == author_uid]
+
+
+def _iso(ts: float) -> str:
+    return datetime.fromtimestamp(ts, timezone.utc).isoformat()
+
+
 def _collection_folder(collection_id: int, title: str) -> str:
     """downloads/<id>-<title>/ — the id keeps the folder findable (and
     collision-free) when the collection is renamed on MakerWorld."""
@@ -203,6 +225,8 @@ class DownloadManager:
         self.mine_progress: dict[str, int] | None = None
         self.mine_error: str | None = None
         self._mine_task: asyncio.Task[Any] | None = None
+        # Library → Profiles: {design_id: (fetched unix time, instances)}.
+        self._profiles_cache: dict[int, tuple[float, list[dict[str, Any]]]] = {}
 
     def _have(self, design_id: int, profile_id: int | None) -> bool:
         """Dedup check: exact (design_id, profile_id) pair when the URL pins
@@ -550,11 +574,15 @@ class DownloadManager:
         url: str,
         collection_id: int | None = None,
         subfolder: str | None = None,
+        dest_dir: Path | None = None,
+        label: str | None = None,
     ) -> dict[str, Any]:
         """Download a model by URL. Returns a summary dict.
 
         Dedup: keyed on (design_id, profile_id). If already present and the
-        file still exists on disk, it is skipped.
+        file still exists on disk, it is skipped. `dest_dir` / `label`
+        override the folder and origin label (an extra profile of a design
+        already in the library goes next to it — see download_profile).
         """
         design_id, profile_id = parse_model_url(url)
 
@@ -671,11 +699,12 @@ class DownloadManager:
                         )
 
                     # Build destination: downloads/<collection>/<model>/
-                    parts: list[str] = []
-                    if subfolder:
-                        parts.append(_slugify(subfolder))
-                    parts.append(_slugify(f"{design_id}-{title}"))
-                    dest_dir = Path(settings.download_dir).joinpath(*parts)
+                    if dest_dir is None:
+                        parts: list[str] = []
+                        if subfolder:
+                            parts.append(_slugify(subfolder))
+                        parts.append(_slugify(f"{design_id}-{title}"))
+                        dest_dir = Path(settings.download_dir).joinpath(*parts)
                     dest_dir.mkdir(parents=True, exist_ok=True)
                     _ensure_disk_space(dest_dir)
 
@@ -715,10 +744,13 @@ class DownloadManager:
                     )
                     # Snapshot the collection title as the model's origin label —
                     # it must survive the collection being unfollowed later.
-                    coll_title: str | None = None
-                    if collection_id:
+                    coll_title: str | None = label
+                    if collection_id and not coll_title:
                         coll = self.db.get_collection(collection_id)
                         coll_title = str((coll or {}).get("title") or "") or None
+                    profile_title = (
+                        str(instance.get("title") or "") or None if instance else None
+                    )
                     self.db.insert_model(
                         design_id=design_id,
                         profile_id=stored_profile_id,
@@ -732,14 +764,20 @@ class DownloadManager:
                         cover_url=str(cover_url) if cover_url else None,
                         collection_title=coll_title,
                         creator=str(creator) if creator else None,
+                        profile_title=profile_title,
                     )
                     self.db.clear_failure(design_id)
                     origin = (
                         f" from “{coll_title}”" if coll_title else " (manual download)"
                     )
+                    which = (
+                        f" — profile “{profile_title}”"
+                        if profile_id and profile_title
+                        else ""
+                    )
                     await add_event(
                         "download",
-                        f"Downloaded “{title}”{origin} ({size // 1024} KB)",
+                        f"Downloaded “{title}”{which}{origin} ({size // 1024} KB)",
                         design_id=design_id,
                         collection_id=collection_id,
                         collection_title=coll_title,
@@ -840,13 +878,15 @@ class DownloadManager:
             if design_id in skip:
                 skipped += 1
                 continue
-            if plates_mode == "all":
+            if plates_mode in ("all", "author"):
                 # Enumerate every plate; already-stored (design, plate) pairs
                 # are skipped via model_exists, so the instances lookup only
                 # costs a round trip for designs that are already known.
                 if self.db.model_exists_any(design_id):
                     try:
                         instances = await self._design_instances(design_id)
+                        if plates_mode == "author":
+                            instances = _authors_instances(hit, instances)
                     except MakerWorldError as e:
                         errors.append(f"model {design_id}: {e}")
                         await add_event(
@@ -986,6 +1026,88 @@ class DownloadManager:
                 collection_id=collection_id,
             )
         return attempts >= limit
+
+    async def design_profiles(self, design_id: int) -> dict[str, Any]:
+        """A library design's print profiles, for Library → Profiles.
+
+        One instances request, reused for BND_PROFILES_CACHE_MINUTES. Each
+        profile carries its name, author, `community` (not by the design's
+        author; None when the author is unknown), MakerWorld link and
+        whether it is already downloaded. NotFoundError when the design
+        isn't in the library.
+        """
+        rows = self.db.design_rows(design_id)
+        if not rows:
+            raise NotFoundError("This model is not in your library.")
+        fetched_at, instances = await self._cached_instances(design_id)
+        author = rows[0].get("creator") or None
+        author_uid = next(
+            (
+                (i.get("creator") or {}).get("uid")
+                for i in instances
+                if author and (i.get("creator") or {}).get("name") == author
+            ),
+            None,
+        )
+        have = {r["profile_id"] for r in rows}
+        profiles = []
+        for inst in instances:
+            pid = _instance_profile_id(inst)
+            if not pid:
+                continue
+            by = inst.get("creator") or {}
+            profiles.append(
+                {
+                    "profile_id": pid,
+                    "title": str(inst.get("title") or f"Profile {pid}"),
+                    "creator": str(by.get("name") or ""),
+                    "community": (by.get("uid") != author_uid) if author_uid else None,
+                    "downloaded": pid in have,
+                    "created_at": inst.get("createTime") or None,
+                    "url": f"https://makerworld.com/en/models/{design_id}#profileId-{pid}",
+                }
+            )
+        return {
+            "design_id": design_id,
+            "title": rows[0]["title"],
+            "fetched_at": fetched_at,
+            "profiles": profiles,
+        }
+
+    async def download_profile(self, design_id: int, profile_id: int) -> dict[str, Any]:
+        """Download one more profile of a design already in the library,
+        into the same folder and under the same origin label."""
+        rows = self.db.design_rows(design_id)
+        if not rows:
+            raise NotFoundError("This model is not in your library.")
+        _, instances = await self._cached_instances(design_id)
+        if profile_id not in {_instance_profile_id(i) for i in instances}:
+            # download_model would silently fall back to the default profile.
+            raise NotFoundError("MakerWorld doesn't list this profile for the model.")
+        base = rows[0]
+        return await self.download_model(
+            f"https://makerworld.com/en/models/{design_id}#profileId-{profile_id}",
+            collection_id=base.get("collection_id"),
+            dest_dir=Path(base["file_path"]).parent,
+            label=base.get("collection_title"),
+        )
+
+    async def _cached_instances(
+        self, design_id: int
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """(fetched_at ISO, instances), from the profiles cache when fresh."""
+        ttl = settings.profiles_cache_minutes * 60
+        hit = self._profiles_cache.get(design_id)
+        if hit and ttl and time.time() - hit[0] < ttl:
+            return _iso(hit[0]), hit[1]
+        instances = await self._design_instances(design_id)
+        now = time.time()
+        self._profiles_cache[design_id] = (now, instances)
+        # Keep it small: drop entries that have expired anyway.
+        for did, (ts, _) in list(self._profiles_cache.items()):
+            if now - ts >= ttl:
+                self._profiles_cache.pop(did, None)
+        return _iso(now), instances
 
     async def _design_instances(self, design_id: int) -> list[dict[str, Any]]:
         """Fetch a design's plate instances via a fresh (short-lived) client.

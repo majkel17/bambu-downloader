@@ -78,6 +78,11 @@ class Settings:
         self.max_download_attempts: int = max(
             0, int(_env("BND_MAX_DOWNLOAD_ATTEMPTS", "3"))
         )
+        # How long a design's profile list (Library → Profiles) is reused
+        # before MakerWorld is asked again. 0 = always ask.
+        self.profiles_cache_minutes: int = max(
+            0, int(_env("BND_PROFILES_CACHE_MINUTES", "15"))
+        )
         # Copy the SQLite database to data/backup/ on boot (before the
         # scheduler touches it). Simple belt-and-suspenders for a NAS-ish
         # setup; keep the most recent copy.

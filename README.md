@@ -79,6 +79,13 @@ Note: `podman unshare chown` makes the dirs owned by your subuid range — `ls -
   interval is editable there). Each followed collection shows its last and
   next sync; "Sync now" runs one immediately (a sync already in progress is
   never started twice).
+- **Print profiles:** per followed collection choose what a sync downloads —
+  the **default profile**, **the author's profiles**, or **all profiles**
+  (including community ones; a popular model can have dozens). In the
+  Library, "⚙ Profiles" on a model lists its profiles on MakerWorld (name,
+  author, a *community* tag) and downloads extra ones next to the file you
+  already have. The list is one request, reused for
+  `BND_PROFILES_CACHE_MINUTES`.
 - **Skipped models:** after `BND_MAX_DOWNLOAD_ATTEMPTS` failures caused by the
   model itself — or right away when it has no print profile — syncs stop
   trying it. The card lists the reason; "Retry on next sync" resets it.
@@ -120,6 +127,7 @@ Environment variables (all optional — defaults shown):
 | `BND_EVENT_RETENTION_DAYS` | `30` | Activity-log entries older than this are pruned (hourly). `0` = keep forever |
 | `BND_EVENT_MAX_ROWS` | `5000` | …and only the newest N are kept (~1 MB of SQLite). `0` = no cap |
 | `BND_MAX_DOWNLOAD_ATTEMPTS` | `3` | Syncs skip a model after this many failures caused by the model itself (404 / private / no download URL); a design with **no print profile** (STL/CAD only) is skipped after the first failure. Network, CAPTCHA and sign-in problems don't count. Skipped models are listed in Collections with a Retry button. `0` = retry forever |
+| `BND_PROFILES_CACHE_MINUTES` | `15` | How long Library → Profiles reuses a model's profile list before asking MakerWorld again. `0` = always ask |
 
 ## Home Assistant
 

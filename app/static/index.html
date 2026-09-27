@@ -54,6 +54,10 @@
   [hidden] { display: none !important; }
   .modal-overlay[hidden] { display: none; }
   .modal { max-width: 480px; margin: 0; }
+  .modal.profiles { max-width: 600px; width: 100%; max-height: 85vh; overflow-y: auto; }
+  .profile-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 0.6rem; padding: 0.55rem 0; border-top: 1px solid var(--border); }
+  .profile-row .name { flex: 1 1 14rem; min-width: 0; overflow-wrap: anywhere; }
+  .profile-row .by { font-size: 0.8rem; color: var(--muted); }
   .toast { background: var(--panel2); border: 1px solid var(--border); border-radius: 10px; padding: 0.7rem 1rem; font-size: 0.88rem; box-shadow: 0 8px 30px rgba(0,0,0,.4); animation: slidein .18s ease-out; }
   .toast.err { border-color: #5c2626; color: #ffb3b3; }
   .toast.ok { border-color: var(--green-dim); }
@@ -280,6 +284,18 @@
 </main>
 
 <div class="toast-wrap" id="toasts"></div>
+
+<!-- Library → Profiles: a design's print profiles, download extra ones -->
+<div class="modal-overlay" id="profilesModal" hidden>
+  <div class="card modal profiles">
+    <h2 id="profilesTitle">Profiles</h2>
+    <p class="muted" id="profilesMeta"></p>
+    <div id="profilesList"></div>
+    <div class="row" style="justify-content:flex-end; margin-top:1rem">
+      <button class="ghost" data-action="profiles-close">Close</button>
+    </div>
+  </div>
+</div>
 
 <!-- Unfollow confirmation dialog (three-way: keep files / delete files / cancel) -->
 <div class="modal-overlay" id="removeModal" hidden>
