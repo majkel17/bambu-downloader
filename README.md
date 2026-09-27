@@ -1,60 +1,69 @@
-# bambu_downloader — MakerWorld Model Downloader
+# bambu-downloader — MakerWorld backup
+
+> **⚠️ Vibe-coded, personal-use project.** This was built largely by chatting
+> with an AI coding assistant, to scratch one itch: keeping local copies of the
+> MakerWorld models I care about before they get removed, hidden or censored.
+> It runs on my own home server and does what I need. It is published as-is,
+> **with no support, no roadmap and no promises** — issues and PRs may well go
+> unanswered. Read the code before you trust it with your Bambu account.
+>
+> Forked from [sebasdoes/bambu-downloader](https://github.com/sebasdoes/bambu-downloader)
+> and changed quite a bit since. Not affiliated with Bambu Lab / MakerWorld;
+> use it with your own account and within their terms of service.
 
 A self-hosted container with a web UI that:
 
-1. **Authenticates to MakerWorld** (Bambu account — email + password with email-code or TOTP 2FA, or paste an existing access token)
-2. **Downloads models by URL** — paste any MakerWorld model link
-3. **Downloads all models from a collection** — paste a collection link
-4. **Periodically syncs collections** — new models are downloaded automatically, existing ones are never duplicated (no user interaction needed after setup)
-5. **PWA-ready** — installable/shareable from Bambu Handy links on Android (via a share target)
+1. **Signs in to MakerWorld** with your Bambu account (email + password, with
+   email-code or TOTP 2FA — or paste an existing access token)
+2. **Downloads models by URL** as `.3mf` files (type detected from content)
+3. **Follows collections** (e.g. your Favorites) and syncs them on a schedule:
+   new models are downloaded automatically, nothing is downloaded twice
+4. **Gives up politely on dead models**: designs that were removed, made
+   private or have no print profile (STL/CAD only) are skipped instead of being
+   retried forever — and listed with the reason
+5. **Library** with server-side search, filters and a download button per model;
+   **Activity log** stored in SQLite with retention
+6. **Home Assistant friendly**: per-collection stats endpoint plus an optional
+   read-only API key
+7. **PWA**: installable, and accepts shared MakerWorld links (Android share target)
 
 ## Quick start (compose)
 
 ```bash
-# podman (rootless) — 'podman-compose up -d' works too
-podman compose up -d --build
-
-# docker
-docker compose up -d --build
+docker compose up -d --build     # or: podman compose up -d --build
 ```
 
-The compose file ships with `userns_mode: keep-id`, which makes your host uid
-appear inside the container so the bind-mounted `downloads/` and `data/` are
-writable under **rootless podman**. **Docker users: remove that line** —
-`keep-id` is podman-specific.
+Then open **http://localhost:8008** (the compose file maps host port 8008 to
+the container's 8080 — change `ports:` if you prefer another one), go to
+**Settings**, sign in, and add a collection under **Collections**.
 
-Then open http://localhost:8080
+- **Rootless podman:** uncomment `userns_mode: keep-id` in `docker-compose.yml`
+  so the bind-mounted `downloads/` and `data/` are writable.
+- **Docker:** leave it commented and make the dirs writable for the
+  container's uid 1000: `mkdir -p data downloads && sudo chown -R 1000:1000 data downloads`.
+- Models land in `./downloads/<collection>/<design-id>-<title>/` next to a
+  `cover.webp`; state (including your Bambu token) lives in `./data/`.
+- Updating: `git pull && docker compose up -d --build`. Schema migrations run
+  automatically on start, and the DB is copied to `data/backup/` first.
 
-Alternatively, plain podman run:
+Plain `podman run` works too:
 
 ```bash
 podman build -t bambu-downloader .
 podman run -d --name bambu-downloader --userns=keep-id \
-  -p 8080:8080 -v ./downloads:/app/downloads:Z -v ./data:/app/data:Z \
+  -p 8008:8080 -v ./downloads:/app/downloads:Z -v ./data:/app/data:Z \
   bambu-downloader
 ```
-
-(Docker users: use `docker run` without `--userns=keep-id`, and ensure
-`./data` and `./downloads` are writable by uid 1000.)
-
-- Downloads land in `./downloads` (host) → `/app/downloads` (container). Each model folder also contains a small `cover.webp` thumbnail, so the folder is browsable in any file manager.
-- State database (including your Bambu Cloud token) in `./data/bambu_downloader.db`
-- To sign in: Settings → MakerWorld login (email + password). If your account uses email verification codes, you'll be asked for the 6-digit code. TOTP (authenticator app) is also supported. Alternatively paste an existing `access_token` from a browser session.
-
-**Stops cleanly:** `podman stop` / `docker compose stop` sends SIGTERM; uvicorn (PID 1) drains connections and cancels in-flight syncs, so no SIGKILL is needed.
-
-**Login persists across restarts:** the token lives in `./data/` (persistent volume). `podman stop`/`start`/`restart` keep you signed in — only logout (or Bambu expiring the token) signs you out.
 
 ### Troubleshooting: "attempt to write a readonly database"
 
 The container runs as an unprivileged user (UID 1000 by default). With **rootless podman**, container UID 1000 does *not* map to your host UID — bind-mounted `./data` ends up owned by "nobody" from the container's perspective, and SQLite can't write. Two fixes:
 
 ```bash
-# Option A (simplest, and what docker-compose.yml already does):
-# keep-id — your host uid appears inside the container
+# Option A (simplest): keep-id — your host uid appears inside the container
 podman run -d --name bambu-downloader --userns=keep-id \
-  -p 8080:8080 -v ./downloads:/app/downloads:Z -v ./data:/app/data:Z bambu-downloader
-# (compose: userns_mode: keep-id is already in docker-compose.yml)
+  -p 8008:8080 -v ./downloads:/app/downloads:Z -v ./data:/app/data:Z bambu-downloader
+# (compose: uncomment userns_mode: keep-id in docker-compose.yml)
 
 # Option B: chown the host dirs into your subuid range (container uid 1000)
 podman unshare chown -R 1000:1000 ./data ./downloads
@@ -62,24 +71,34 @@ podman unshare chown -R 1000:1000 ./data ./downloads
 
 Note: `podman unshare chown` makes the dirs owned by your subuid range — `ls -l` on the host will look odd afterwards; that's expected.
 
-## Periodic collection sync
+## Using it
 
-Collections tab → add a collection URL (e.g. `https://makerworld.com/en/collections/18095020-relief-sculpture-collections`).
-Choose a sync interval (e.g. every 6h). The app:
-
-- Lists every design in the collection
-- Skips designs already downloaded (keyed by design/profile ID in SQLite)
-- Downloads new ones into `downloads/<collection-title>/<model-slug>/`
-- All automatic after setup — the scheduler wakes every 5 minutes and picks up due collections; no user interaction required
-- Unfollowing a collection asks whether to keep or **delete its downloaded files** from disk (empty folders are cleaned up too)
+- **Collections tab:** follow a collection by URL, or pick one of your own
+  from "Your MakerWorld collections" (refreshed every 60 min by default; the
+  interval is editable there). Each followed collection shows its last and
+  next sync; "Sync now" runs one immediately (a sync already in progress is
+  never started twice).
+- **Skipped models:** after `BND_MAX_DOWNLOAD_ATTEMPTS` failures caused by the
+  model itself — or right away when it has no print profile — syncs stop
+  trying it. The card lists the reason; "Retry on next sync" resets it.
+- **Removed/hidden designs:** MakerWorld still counts them in a collection but
+  no longer lists them, so they can't be downloaded; the UI shows them as
+  "+ N removed or hidden on MakerWorld".
+- **Signing out** keeps your files, library and followed collections; syncs
+  pause until you sign in again.
+- Unfollowing a collection asks whether to keep or delete its files.
 
 ## Security notes
 
-- **Local/LAN use.** Only expose the port on your LAN. On a shared network, set `BND_API_KEY` (below).
-- Your Bambu Cloud **access token is stored in plaintext in SQLite** (`./data/`). Protect the data volume's permissions; anyone with read access can act as your MakerWorld account. This is inherent to a self-hosted token store.
-- The app never logs the token or password (logs go to stdout only).
-- Downloads are written as UID 1000 (matching typical host user) — no root-owned files.
-- UI escapes all remote content (titles/filenames) — no XSS from model metadata.
+- **Meant for a trusted LAN.** Don't expose it to the internet. On a shared
+  network set `BND_API_KEY` (and enter it in the UI's Settings tab).
+- `BND_READ_API_KEY` is a second, read-only key for dashboards: it opens GET
+  endpoints only (status, stats, library, log, file downloads).
+- Your Bambu Cloud **access token is stored in plaintext in SQLite**
+  (`./data/`). Anyone who can read that volume can act as your MakerWorld
+  account — protect it accordingly.
+- The token and password are never logged; remote content is escaped in the
+  UI; the app runs as an unprivileged user (uid 1000).
 
 ## Configuration
 
@@ -92,7 +111,7 @@ Environment variables (all optional — defaults shown):
 | `BND_DOWNLOAD_DIR` | `/app/downloads` | Where models are saved |
 | `BND_DATA_DIR` | `/app/data` | State dir (DB path derives from this unless overridden) |
 | `BND_DB_PATH` | `/app/data/bambu_downloader.db` | SQLite state |
-| `BND_PORT` | `8080` | Web UI port |
+| `BND_PORT` | `8080` | Port the container healthcheck probes. The server itself always listens on 8080 inside the container — change the host side in `ports:` instead |
 | `BND_SCHEDULER_INTERVAL_SECONDS` | `300` | How often the scheduler checks for due collections |
 | `BND_SYNC_INTERVAL_MINUTES` | `360` | Default sync interval for newly added collections |
 | `BND_MY_COLLECTIONS_REFRESH_MINUTES` | `60` | Default refresh interval of the "Your MakerWorld collections" list (min 15). Changeable in the UI (Collections tab), which then takes precedence |
@@ -119,7 +138,7 @@ the first one). With `BND_API_KEY` set, give HA the read-only `BND_READ_API_KEY`
 ```yaml
 # configuration.yaml — one REST sensor per collection
 rest:
-  - resource: http://<host>:8080/api/collections/12345/stats
+  - resource: http://<host>:8008/api/collections/12345/stats
     headers:
       X-API-Key: !secret bambu_downloader_read_key   # omit without BND_API_KEY
     scan_interval: 300
@@ -139,8 +158,6 @@ The app talks to the same backend MakerWorld's web UI uses:
 - `makerworld.com/api/v1/design-service/...` for public metadata and collection listings
 - Authenticated calls use the Bambu Cloud `access_token` as a Bearer token
 
-> Not affiliated with Bambu Lab / MakerWorld. For personal use with your own account, subject to their ToS.
-
 ## CI: prebuilt container image
 
 A GitHub Actions workflow (`.github/workflows/container-image.yml`) builds the image on every push and publishes it to **GitHub Container Registry** — no secrets to configure, it uses the built-in `GITHUB_TOKEN`:
@@ -158,10 +175,57 @@ podman pull ghcr.io/<owner>/bambu_downloader:latest
 
 The package inherits the repo's visibility: **public repo → public image** (anyone can pull, no login). **Private repo → private image** — pull with `podman login ghcr.io` using a PAT with `read:packages`. If the first workflow run on a private repo fails to push the package, check that "Workflow permissions" in repo Settings → Actions is set to "Read and write permissions", or re-run the workflow after the package is created.
 
-## Development
+## Local development
+
+Requirements: **Python 3.13** (what the image and CI use) and git. Docker or
+podman only if you want to test the container.
 
 ```bash
-# local (non-container)
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-.venv/bin/uvicorn app.main:app --reload --port 8080
+git clone https://github.com/majkel17/bambu-downloader.git
+cd bambu-downloader
+python3 --version            # needs 3.13
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt -r requirements-dev.txt
 ```
+
+Run the app with state in the repo (the defaults point at `/app/...`, which
+only exist in the container; `downloads/`, `data/` and `.venv/` are git-ignored):
+
+```bash
+BND_DOWNLOAD_DIR=./downloads BND_DATA_DIR=./data \
+  .venv/bin/uvicorn app.main:app --reload --port 8080
+```
+
+Open http://localhost:8080. It talks to the real MakerWorld once you sign in,
+so keep `BND_DOWNLOAD_DELAY_SECONDS` sane while experimenting.
+
+Checks (the same ones CI runs on every push/PR):
+
+```bash
+.venv/bin/pytest                     # offline test suite, no network needed
+.venv/bin/ruff check app tests
+.venv/bin/ruff format --check app tests   # drop --check to auto-format
+```
+
+Things worth knowing before changing code:
+
+- **Layout:** `app/makerworld.py` (API client), `app/downloader.py` (downloads,
+  syncs, activity log), `app/scheduler.py` (background loop), `app/db.py`
+  (SQLite schema + migrations), `app/routes.py` (REST API), `app/static/`
+  (vanilla-JS UI, no build step). Deeper notes live in [`docs/`](docs/README.md).
+- **Schema changes** go into `DB_SCHEMA` for new databases *and* the ALTER
+  list in `Database.__init__` for existing ones (both are idempotent).
+- **UI changes:** bump `CACHE_VERSION` in `app/static/sw.js` (and the version
+  pinned in `tests/test_thumb.py`), otherwise installed PWAs keep the old UI.
+  The page runs under a strict CSP: no inline handlers — wire events in `app.js`.
+- **Tests:** the `app_client` fixture reloads the app modules, so in tests
+  refer to exception classes through the module (`app.downloader.NotFoundError`)
+  at call time rather than importing them at the top of the file.
+
+## License
+
+[MIT](LICENSE) — do what you like with it. The one condition is keeping the
+copyright notice: if you build on this, credit
+**[majkel17/bambu-downloader](https://github.com/majkel17/bambu-downloader)**.
+The original upstream code by [sebasdoes](https://github.com/sebasdoes/bambu-downloader)
+was published without a license; this covers the changes made in this fork.
