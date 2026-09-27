@@ -235,11 +235,11 @@ async def test_mw_get_text_plain_json_parsed():
 
 @pytest.mark.asyncio
 async def test_list_my_collections_enriches_and_walks():
-    """listlite listing + per-collection enrichment (slug + design ids).
+    """listlite listing + per-collection design ids from the pager.
 
     listlite (the verified personal-collections endpoint) returns all
-    collections at once with NO slug and NO designs; both come from
-    per-collection calls (withoutdesign / designs pager).
+    collections at once with NO designs; slugs are no longer fetched
+    (withoutdesign is never called — /collections/<id> redirects).
     """
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -256,10 +256,7 @@ async def test_list_my_collections_enriches_and_walks():
                     ],
                 },
             )
-        if path.endswith("/favorites/1/withoutdesign"):
-            return httpx.Response(200, json={"title": "A", "slug": "a"})
-        if path.endswith("/favorites/2/withoutdesign"):
-            return httpx.Response(200, json={"title": "B", "slug": "b"})
+        assert not path.endswith("/withoutdesign")
         if path.endswith("/favorites/1/designs"):
             offset = int(request.url.params["offset"])
             pages = {0: [{"id": 11}, {"id": 12}], 2: []}
@@ -277,7 +274,7 @@ async def test_list_my_collections_enriches_and_walks():
             {
                 "collection_id": 1,
                 "title": "A",
-                "slug": "a",
+                "slug": "",
                 "design_count": 2,
                 "is_default": False,
                 "design_ids": [11, 12],
@@ -285,7 +282,7 @@ async def test_list_my_collections_enriches_and_walks():
             {
                 "collection_id": 2,
                 "title": "B",
-                "slug": "b",
+                "slug": "",
                 "design_count": 1,
                 "is_default": True,
                 "design_ids": [13],
@@ -349,8 +346,6 @@ async def test_list_my_collections_design_cap():
                     ],
                 },
             )
-        if path.endswith("/favorites/1/withoutdesign"):
-            return httpx.Response(200, json={"title": "A", "slug": "a"})
         if path.endswith("/favorites/1/designs"):
             offset = int(request.url.params["offset"])
             # 10+ pages of 100 designs each; total 5000 so only cap/loop-guard stops it
@@ -363,7 +358,6 @@ async def test_list_my_collections_design_cap():
         mine = await client.list_my_collections(max_designs_per_collection=1000)
         ids = mine[0]["design_ids"]
         assert len(ids) == 1000
-        assert mine[0]["slug"] == "a"
     finally:
         await client.close()
 

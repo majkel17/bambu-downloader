@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import shutil
 import sqlite3
@@ -82,6 +83,11 @@ def _token_cache_reset() -> None:
 _events: list[dict[str, Any]] = []
 _events_lock = asyncio.Lock()
 _MAX_EVENTS = 200
+
+# Own-collections refreshes are incremental (only changed designCnt re-pages);
+# once a day everything is re-paged to catch same-count swaps.
+FULL_MINE_REFRESH_HOURS = 24
+
 _event_store: Database | None = None
 
 
@@ -128,6 +134,12 @@ def _slugify(text: str) -> str:
     """
     text = re.sub(r"[^\w\s-]", "", text.lower()).strip()
     return re.sub(r"[\s_-]+", "-", text)[:80] or "untitled"
+
+
+def _collection_folder(collection_id: int, title: str) -> str:
+    """downloads/<id>-<title>/ — the id keeps the folder findable (and
+    collision-free) when the collection is renamed on MakerWorld."""
+    return _slugify(f"{collection_id}-{title}")
 
 
 def _ensure_disk_space(dest_dir: Path) -> None:
@@ -185,6 +197,12 @@ class DownloadManager:
         # Collections with a sync in flight — shared by the scheduler and
         # manual "Sync now" so the same collection never syncs twice at once.
         self._syncing: set[int] = set()
+        # Own-collections refresh: one at a time (scheduler and the Refresh
+        # button share it); progress/error are what the UI polls.
+        self._mine_lock = asyncio.Lock()
+        self.mine_progress: dict[str, int] | None = None
+        self.mine_error: str | None = None
+        self._mine_task: asyncio.Task[Any] | None = None
 
     def _have(self, design_id: int, profile_id: int | None) -> bool:
         """Dedup check: exact (design_id, profile_id) pair when the URL pins
@@ -274,6 +292,77 @@ class DownloadManager:
             await release_client(client)
         logger.info("Metadata backfill done")
 
+    def _relocate_collection(
+        self, collection_id: int, folder: str
+    ) -> tuple[int, list[str]]:
+        """Move this collection's model folders under downloads/<folder>/.
+
+        Covers both the one-time move from title-only folders and later
+        renames. Works per design folder (downloads/<coll>/<design>/): each
+        is renamed into place and its rows' file_path updated right away,
+        rolling the rename back if the DB write fails, so an interruption
+        leaves every row pointing at a real file. A design folder already
+        present at the target is left alone and reported. Emptied old
+        collection folders are removed. Blocking — run in a thread.
+        Returns (moved, conflicting design folder names).
+        """
+        root = Path(settings.download_dir)
+        root_abs = root.resolve()
+        design_dirs: set[tuple[str, str]] = set()
+        for fp in self.db.collection_file_paths(collection_id):
+            try:
+                rel = Path(fp).resolve().relative_to(root_abs).parts
+            except ValueError:
+                continue  # outside the downloads root: never touch it
+            if len(rel) == 3 and rel[0] != folder:
+                design_dirs.add((rel[0], rel[1]))
+        if not design_dirs:
+            return 0, []
+        # Every row living in a moving design folder, whichever collection
+        # (or manual download) it came from — the files move together.
+        rows_by_dir: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for row in self.db.model_files():
+            try:
+                rel = Path(row["file_path"]).resolve().relative_to(root_abs).parts
+            except ValueError:
+                continue
+            if len(rel) == 3 and (rel[0], rel[1]) in design_dirs:
+                rows_by_dir.setdefault((rel[0], rel[1]), []).append(row)
+
+        moved = 0
+        conflicts: list[str] = []
+        for old_coll, design in sorted(design_dirs):
+            src = root / old_coll / design
+            dest = root / folder / design
+            if src.is_dir():
+                if dest.exists():
+                    conflicts.append(design)
+                    continue
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                os.rename(src, dest)
+            elif not dest.is_dir():
+                continue  # files gone entirely: nothing to point at
+            # (src missing but dest present = an earlier run was cut off
+            # between the rename and the DB write; just fix the rows.)
+            try:
+                self.db.set_model_paths(
+                    [
+                        (row["id"], str(dest / Path(row["file_path"]).name))
+                        for row in rows_by_dir.get((old_coll, design), [])
+                    ]
+                )
+            except Exception:
+                if not src.exists():
+                    os.rename(dest, src)
+                raise
+            moved += 1
+        for old_coll in {c for c, _ in design_dirs}:
+            try:
+                (root / old_coll).rmdir()  # only succeeds when empty
+            except OSError:
+                pass
+        return moved, conflicts
+
     def fix_file_extensions(self) -> int:
         """One-time migration: give extension-less downloads their real
         extension (see _detect_extension) and repoint the DB rows.
@@ -359,24 +448,46 @@ class DownloadManager:
             await add_event("sync", "Access token expired — refreshed automatically")
             return True
 
-    async def refresh_my_collections(self) -> dict[str, Any]:
+    @property
+    def mine_refreshing(self) -> bool:
+        """A refresh is running (or the Refresh button's task is starting)."""
+        task_pending = self._mine_task is not None and not self._mine_task.done()
+        return self._mine_lock.locked() or task_pending
+
+    async def refresh_my_collections(self, full: bool = False) -> dict[str, Any]:
         """Fetch the user's own MakerWorld collections and cache them.
 
-        Requires a stored token (AuthRequiredError otherwise). The listing
-        request itself is light (one endpoint, paginated); design ids come
-        from the embedded page-1 payloads. Results land in the
-        remote_collections table via replace_remote_collections; download
-        checkmarks are computed at read time against the library. Returns
-        {"collections": <count>, "fetched_at": iso} for the UI.
+        Requires a stored token (AuthRequiredError otherwise). Incremental:
+        only collections whose designCnt changed re-page their design ids
+        (see MakerWorldClient.list_my_collections). A full re-page runs when
+        `full` is set or the last one is over FULL_MINE_REFRESH_HOURS old —
+        a swap (one design out, one in) keeps the count, so the daily pass
+        catches it. Results land in remote_collections; download checkmarks
+        are computed at read time. Returns {"collections", "fetched_at"}.
         """
         if not self.db.get_meta("bambu_token"):
             raise AuthRequiredError("Sign in to MakerWorld first (Settings → Login).")
-        client = self._client()
-        try:
-            mine = await client.list_my_collections()
-        finally:
-            await release_client(client)
-        self.db.replace_remote_collections(mine)
+        async with self._mine_lock:
+            last_full = float(self.db.get_meta("my_collections_full_at") or 0)
+            full = full or time.time() - last_full > FULL_MINE_REFRESH_HOURS * 3600
+            previous = None if full else self.db.remote_collections_cache()
+            self.mine_progress = {"done": 0, "total": 0}
+            self.mine_error = None
+
+            def progress(done: int, total: int) -> None:
+                self.mine_progress = {"done": done, "total": total}
+
+            client = self._client()
+            try:
+                mine = await client.list_my_collections(
+                    previous=previous, progress=progress
+                )
+            finally:
+                await release_client(client)
+                self.mine_progress = None
+            self.db.replace_remote_collections(mine)
+            if full:
+                self.db.set_meta("my_collections_full_at", str(time.time()))
         await add_event(
             "sync",
             f"Refreshed your MakerWorld collections ({len(mine)} found)",
@@ -385,6 +496,28 @@ class DownloadManager:
             "collections": len(mine),
             "fetched_at": self.db.remote_collections_fetched_at(),
         }
+
+    def start_mine_refresh(self) -> bool:
+        """Run refresh_my_collections in the background (the Refresh button).
+
+        False when one is already running. Failures land in `mine_error`
+        and the Activity log instead of an HTTP response nobody waits for.
+        """
+        if self.mine_refreshing:
+            return False
+
+        async def run() -> None:
+            try:
+                await self.refresh_my_collections()
+            except MakerWorldError as e:
+                self.mine_error = str(e)
+                await add_event("error", f"Refreshing your collections failed — {e}")
+            except Exception as e:  # keep the task from dying silently
+                logger.exception("own-collections refresh crashed")
+                self.mine_error = str(e)
+
+        self._mine_task = asyncio.create_task(run())
+        return True
 
     async def resolve_design(self, url: str) -> dict[str, Any]:
         """Preview a model URL: design metadata + plate instances, no download.
@@ -665,6 +798,33 @@ class DownloadManager:
         self.db.upsert_collection(
             collection_id, title, coll["url"], coll["sync_interval_minutes"]
         )
+        if coll.get("title") and coll["title"] != title:
+            self.db.relabel_collection(collection_id, title)
+            await add_event(
+                "sync",
+                f"Collection renamed on MakerWorld: {coll['title']} → {title}",
+            )
+        folder = _collection_folder(collection_id, title)
+        try:
+            moved, conflicts = await asyncio.to_thread(
+                self._relocate_collection, collection_id, folder
+            )
+        except (OSError, sqlite3.Error) as e:
+            moved, conflicts = 0, []
+            await add_event(
+                "error", f"Collection {title}: could not move its folder — {e}"
+            )
+        if moved:
+            await add_event(
+                "sync",
+                f"Collection {title}: moved {moved} model folder(s) to {folder}/",
+            )
+        for name in conflicts:
+            await add_event(
+                "error",
+                f"Collection {title}: {name} already exists in {folder}/ — "
+                "left the old copy where it is",
+            )
 
         plates_mode = coll.get("plates_mode") or "default"
         new_count = 0
@@ -725,7 +885,7 @@ class DownloadManager:
                     result = await self.download_model(
                         url,
                         collection_id=collection_id,
-                        subfolder=title,
+                        subfolder=folder,
                     )
                     if result["status"] == "downloaded":
                         new_count += 1
@@ -738,7 +898,7 @@ class DownloadManager:
                         retried = await self.download_model(
                             url,
                             collection_id=collection_id,
-                            subfolder=title,
+                            subfolder=folder,
                         )
                         if retried["status"] == "downloaded":
                             new_count += 1

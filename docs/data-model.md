@@ -135,8 +135,11 @@ A **cache only**, rewritten wholesale by `refresh_my_collections()` from the
 `my/favorites/listlite` endpoint:
 
 - `design_ids` is a JSON array of ints, filled from the per-collection pager
-  (capped: 100/page, `CAP_MAX_PAGES = 10`); slugs come from one extra
-  `withoutdesign` request per collection.
+  (capped: 100/page, `CAP_MAX_PAGES = 10`). Incremental: a collection whose
+  `designCnt` is unchanged keeps its cached ids, so a routine refresh is one
+  request plus one per changed collection; a full re-page runs once a day
+  (`meta.my_collections_full_at`) to catch same-count swaps. Slugs are no
+  longer fetched (`/collections/<id>` redirects); links use the bare id.
 - Rows are never deleted by a refresh — a collection that vanishes on
   MakerWorld just disappears from the cache view; nothing here touches
   `collections`. Signing out clears the whole table (it's that account's).
@@ -152,7 +155,9 @@ A **cache only**, rewritten wholesale by `refresh_my_collections()` from the
   downloaded" against `available_count` — those designs can't be fetched.
 - Refreshed hourly by the scheduler (deadline backdated from cache age at
   boot, so restarting a fresh container causes **zero** MakerWorld requests)
-  or manually via `POST /api/my-collections/refresh`.
+  or manually via `POST /api/my-collections/refresh`, which returns 202 at
+  once and runs in the background (`GET /api/my-collections` reports
+  `refreshing: {done, total}` and `refresh_error`); one refresh at a time.
 
 ### `events` — activity log
 
@@ -195,7 +200,7 @@ data/
   backup/
     bambu_downloader.db.bak    # newest snapshot, overwritten on each boot
 downloads/
-  <collection-slug>/           # subfolder title, slugified
+  <collectionId>-<title>/      # followed collection, slugified
     <designId>-<title>/        # one folder per design
       <filename>.3mf           # the model (name from Bambu / URL)
       cover.webp               # local cover copy for offline /thumb
@@ -203,6 +208,15 @@ downloads/
 
 Details:
 
+- Collection folders are `<collectionId>-<title>`. When a collection is
+  renamed on MakerWorld (or still sits in a pre-id `<title>/` folder), its
+  next sync moves each design folder into the new place and repoints the
+  rows (`_relocate_collection`: per-design rename + one-transaction DB
+  update, rename rolled back if the DB write fails; an interrupted run is
+  repaired next time). A design folder already present at the target is
+  left alone and reported in Activity. The Library label of the
+  collection's models follows the new title too. Unfollowed collections
+  and manual downloads never move.
 - Temp files are `.<designId>-<monotonic_ns>.part` inside the destination
   folder and are removed on failure — concurrent downloads can't collide, and
   a crash never leaves a truncated `.3mf` pretending to be complete.

@@ -475,6 +475,9 @@ async function addCollection() {
 }
 
 // Own MakerWorld collections (hourly-refreshed cache; UI re-polls every 5 min).
+// Fast-poll timer while an own-collections refresh runs (-1 = just started).
+let mineRefreshPoll = null;
+
 async function loadMyCollections() {
   try {
     const r = await api('/api/my-collections');
@@ -495,7 +498,22 @@ async function loadMyCollections() {
     const iv = document.getElementById('mineInterval');
     if (document.activeElement !== iv) iv.value = r.refresh_minutes;
     const when = r.fetched_at ? new Date(r.fetched_at).toLocaleString() : null;
-    meta.textContent = when ? `updated ${when}` : 'not fetched yet';
+    const btn = document.querySelector('[data-action="refresh-mine"]');
+    btn.disabled = !!r.refreshing;
+    if (r.refreshing) {
+      const p = r.refreshing;
+      meta.textContent = p.total ? `refreshing… ${p.done}/${p.total}` : 'refreshing…';
+      // Poll quickly only while a refresh runs; loadMyCollections re-arms it.
+      clearTimeout(mineRefreshPoll);
+      mineRefreshPoll = setTimeout(loadMyCollections, 2000);
+    } else {
+      meta.textContent = when ? `updated ${when}` : 'not fetched yet';
+      if (mineRefreshPoll) {
+        mineRefreshPoll = null;
+        if (r.refresh_error) toast(`Refresh failed: ${r.refresh_error}`, 'err');
+        else toast('Your collections refreshed', 'ok');
+      }
+    }
     const rows = r.collections.map(c => {
       // available = what MakerWorld still lists; hidden = removed/hidden
       // designs its count still includes (never downloadable).
@@ -511,7 +529,7 @@ async function loadMyCollections() {
         : '';
       const follow = c.followed
         ? `<span class="tag ok">following</span>`
-        : `<button class="ghost" data-action="follow-mine" data-cid="${c.collection_id}" data-slug="${esc(c.slug || String(c.collection_id))}">Follow</button>`;
+        : `<button class="ghost" data-action="follow-mine" data-cid="${c.collection_id}" data-slug="${esc(c.slug || '')}">Follow</button>`;
       const mw = `https://makerworld.com/en/collections/${c.collection_id}${c.slug ? '-' + c.slug : ''}`;
       return `
       <div class="mine-item">
@@ -543,7 +561,7 @@ async function setMineInterval(minutes) {
 // Follow one of your own collections without typing its URL.
 async function followMine(cid, slug) {
   try {
-    const url = `https://makerworld.com/en/collections/${cid}-${slug}`;
+    const url = `https://makerworld.com/en/collections/${cid}${slug ? '-' + slug : ''}`;
     await api('/api/collections', { method: 'POST', body: { url, sync_interval_minutes: 360 } });
     toast('Collection followed', 'ok');
     loadCollections();
@@ -556,7 +574,7 @@ async function followMine(cid, slug) {
 async function refreshMyCollections() {
   try {
     await api('/api/my-collections/refresh', { method: 'POST' });
-    toast('Your collections refreshed', 'ok');
+    mineRefreshPoll = mineRefreshPoll || -1;  // report the outcome when it ends
     loadMyCollections();
   } catch (e) { toast(e.message, 'err'); }
 }

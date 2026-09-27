@@ -195,8 +195,8 @@ class SyncScheduler:
         is better than a crashed scheduler. Manual refreshes from the UI go
         through the API route instead (they surface errors to the user).
         """
-        if not self.db.get_meta("bambu_token"):
-            return
+        if not self.db.get_meta("bambu_token") or self.manager.mine_refreshing:
+            return  # signed out, or the Refresh button beat us to it
         try:
             await self.manager.refresh_my_collections()
             logger.info("Own-collections listing refreshed")

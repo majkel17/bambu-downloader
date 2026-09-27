@@ -146,9 +146,7 @@ async def test_refresh_my_collections_caches_listing(db):
     db.set_meta("bambu_token", "tok")
 
     class FakeClient:
-        async def list_my_collections(
-            self, page_size=50, max_designs_per_collection=1000
-        ):
+        async def list_my_collections(self, **kwargs):
             return [
                 {
                     "collection_id": 1,

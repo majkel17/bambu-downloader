@@ -66,11 +66,12 @@ Collections
         {"total", "hits": [ {id,title,designCnt,isDefault,designCover} ],
          "default": <the isDefault collection>}
         ⚠ ignores limit/offset — always returns everything in one shot.
-        ⚠ NO slug and NO embedded designs: the UI needs
-          makerworld.com/en/collections/{cid}-{slug} links (a bare id does
-          NOT resolve) and design ids for the ✓ checkmarks, so each
-          collection is enriched via withoutdesign (slug) + the designs
-          pager (ids). Also verified live: the same path exists on
+        ⚠ NO slug and NO embedded designs. Slugs aren't needed:
+          makerworld.com/en/collections/{cid} redirects to the slugged page
+          (verified 2026-09-27; an older note said it didn't). Design ids for
+          the ✓ checkmarks come from the designs pager — only for
+          collections whose designCnt changed since the cached listing
+          (plus a full pass daily). Also verified live: the same path exists on
           {bambu_api}/v1 (api.bambulab.com) — identical payload.
   GET {mw}/api/v1/design-service/favorites-collections/tab?limit=&offset= (Bearer)
       ⚠ NOT the user's collections! Verified live 2026-09-13: MakerWorld's
@@ -78,6 +79,8 @@ Collections
         account (uid 1983921364). It is what the collections page shows
         signed-in users by default. Do not use for "your collections".
   GET {mw}/api/v1/design-service/favorites/{cid}/withoutdesign            (collection meta)
+      → {id, title, slug, designCnt, hiddenCnt, hiddenIds, creator, ...}
+        (hiddenCnt/hiddenIds seen 2026-09-27, not used yet)
   GET {mw}/api/v1/design-service/favorites/{cid}/designs?limit=100&offset= (paged items)
       ⚠ the pager caps every page at 64 hits server-side regardless of limit.
 ```
@@ -216,7 +219,13 @@ The challenge is tied to the **public IP** and triggered by burst patterns
 | `AuthExpiredError` | Stored token rejected (subclass of above) | silent refresh, else "please sign in" |
 | `ForbiddenError` | Resource gated (purchase/points/region) | 403 with hint about private collections |
 | `NotFoundError` | Design/collection missing | 404 |
-| `CaptchaError` | 418 / "captcha"/"robot" body markers | abort everything; never retry |
+| `CaptchaError` | 418 / "captcha"/"robot" body markers / Cloudflare `cf-mitigated: challenge` | abort everything; never retry |
+
+A Cloudflare bot challenge (403 HTML "Just a moment..." with
+`cf-mitigated: challenge`, seen 2026-09-27 for anonymous requests from a
+flagged IP) is mapped to `CaptchaError` too (`_is_challenged`): the request
+never reached MakerWorld, so it must not read as a private collection or
+count against a model.
 
 `_detect_captcha` treats **any** 418 as a challenge and also checks error
 bodies for `captcha`/`robot` text, since the challenge leaks into non-418

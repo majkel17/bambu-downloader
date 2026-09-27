@@ -162,7 +162,7 @@ def test_my_collections_refresh_and_read(app_wired, monkeypatch):
         file_size=1,
     )
 
-    async def fake_refresh(self):
+    async def fake_refresh(self, full=False):
         db.replace_remote_collections(
             [
                 {
@@ -179,11 +179,18 @@ def test_my_collections_refresh_and_read(app_wired, monkeypatch):
 
     monkeypatch.setattr(type(manager), "refresh_my_collections", fake_refresh)
     resp = client.post("/api/my-collections/refresh")
-    assert resp.status_code == 200
-    assert resp.json()["collections"] == 1
+    assert resp.status_code == 202
+    assert resp.json() == {"started": True}
 
-    resp = client.get("/api/my-collections")
-    body = resp.json()
+    # The refresh runs in the background; poll like the UI does.
+    import time
+
+    for _ in range(50):
+        body = client.get("/api/my-collections").json()
+        if body["refreshing"] is None:
+            break
+        time.sleep(0.02)
+    assert body["refresh_error"] is None
     assert body["authenticated"] is True
     assert body["fetched_at"] is not None
     assert len(body["collections"]) == 1, body["collections"]

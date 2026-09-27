@@ -367,6 +367,36 @@ class Database:
                 for r in conn.execute("SELECT id, filename, file_path FROM models")
             ]
 
+    def set_model_paths(self, updates: list[tuple[int, str]]) -> None:
+        """Repoint several rows' file_path in ONE transaction (all or none)."""
+        now = utcnow()
+        with self.connect() as conn:
+            conn.executemany(
+                "UPDATE models SET file_path = ?, updated_at = ? WHERE id = ?",
+                [(path, now, row_id) for row_id, path in updates],
+            )
+
+    def collection_file_paths(self, collection_id: int) -> list[str]:
+        """file_path of every model downloaded through this collection."""
+        with self.connect() as conn:
+            return [
+                r["file_path"]
+                for r in conn.execute(
+                    "SELECT file_path FROM models WHERE collection_id = ?",
+                    (collection_id,),
+                )
+            ]
+
+    def relabel_collection(self, collection_id: int, title: str) -> int:
+        """Point a followed collection's Library label at its new title."""
+        with self.connect() as conn:
+            cur = conn.execute(
+                "UPDATE models SET collection_title = ? "
+                "WHERE collection_id = ? AND collection_title IS NOT ?",
+                (title, collection_id, title),
+            )
+            return cur.rowcount
+
     def set_model_file(self, model_row_id: int, filename: str, file_path: str) -> None:
         """Point a model row at a renamed file."""
         with self.connect() as conn:
@@ -859,6 +889,26 @@ class Database:
                     for r in rows
                 ],
             )
+
+    def remote_collections_cache(self) -> dict[int, dict[str, Any]]:
+        """{collection_id: {design_count, design_ids, slug}} as last fetched —
+        what an incremental refresh reuses for unchanged collections."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT collection_id, design_count, design_ids, slug FROM remote_collections"
+            ).fetchall()
+        out: dict[int, dict[str, Any]] = {}
+        for r in rows:
+            try:
+                ids = [int(x) for x in json.loads(r["design_ids"] or "[]")]
+            except (ValueError, TypeError):
+                continue  # unreadable -> treated as new, re-paged
+            out[int(r["collection_id"])] = {
+                "design_count": r["design_count"],
+                "design_ids": ids,
+                "slug": r["slug"] or "",
+            }
+        return out
 
     def remote_collections(self) -> list[dict[str, Any]]:
         """Cached own-collections snapshot, each annotated with download state.

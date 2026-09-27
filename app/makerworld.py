@@ -39,6 +39,7 @@ import asyncio
 import logging
 import re
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -139,6 +140,18 @@ def _detect_captcha(status_code: int, body: dict[str, Any] | str) -> bool:
     return False
 
 
+def _is_challenged(resp: httpx.Response) -> bool:
+    """CAPTCHA (see _detect_captcha) or a Cloudflare bot challenge.
+
+    Cloudflare answers a flagged network with a 403 HTML "Just a moment..."
+    page marked `cf-mitigated: challenge` (verified 2026-09-27) — the
+    request never reached MakerWorld, so it must not read as "access
+    denied" or count against the model."""
+    if resp.headers.get("cf-mitigated", "").lower() == "challenge":
+        return True
+    return _detect_captcha(resp.status_code, _safe_json(resp))
+
+
 class MakerWorldClient:
     """Async client for MakerWorld/Bambu Cloud."""
 
@@ -190,7 +203,7 @@ class MakerWorldClient:
         except httpx.HTTPError as e:
             raise MakerWorldError(f"Could not reach Bambu Cloud: {e}") from e
 
-        if _detect_captcha(resp.status_code, _safe_json(resp)):
+        if _is_challenged(resp):
             raise CaptchaError(
                 "Bambu is challenging this network with a CAPTCHA. Wait a few hours "
                 "or paste an access token from a browser session instead."
@@ -268,7 +281,7 @@ class MakerWorldClient:
             )
         except httpx.HTTPError as e:
             raise MakerWorldError(f"Could not reach Bambu Cloud: {e}") from e
-        if _detect_captcha(resp.status_code, _safe_json(resp)):
+        if _is_challenged(resp):
             raise CaptchaError("Bambu is challenging this network with a CAPTCHA.")
         data = _safe_json(resp)
         token = None
@@ -382,7 +395,7 @@ class MakerWorldClient:
         except httpx.HTTPError as e:
             raise MakerWorldError(f"Could not reach MakerWorld: {e}") from e
 
-        if _detect_captcha(resp.status_code, _safe_json(resp)):
+        if _is_challenged(resp):
             raise CaptchaError("MakerWorld is challenging this network with a CAPTCHA.")
 
         if resp.status_code == 401:
@@ -489,7 +502,7 @@ class MakerWorldClient:
             )
         except httpx.HTTPError as e:
             raise MakerWorldError(f"Could not reach Bambu Cloud: {e}") from e
-        if _detect_captcha(resp.status_code, _safe_json(resp)):
+        if _is_challenged(resp):
             raise CaptchaError()
         if resp.status_code == 401:
             raise AuthExpiredError("Your Bambu sign-in has expired. Sign in again.")
@@ -553,76 +566,52 @@ class MakerWorldClient:
             auth=True,
         )
 
-    async def _slug_map(self, collection_ids: list[int]) -> dict[int, str]:
-        """Fetch {collection_id: slug} via favorites/{cid}/withoutdesign.
-
-        listlite doesn't include slugs, but the UI builds
-        makerworld.com/en/collections/{cid}-{slug} links and a bare id
-        without the slug does NOT resolve on the site (verified), so every
-        collection needs one withoutdesign round trip. Sequential + polite:
-        a small delay between requests keeps the anti-abuse layer calm; a
-        failure for one collection yields no slug for it (title still
-        shown, link falls back to the followed-collection URL path).
-        """
-        slugs: dict[int, str] = {}
-        for i, cid in enumerate(collection_ids):
-            if i > 0 and settings.download_delay_seconds > 0:
-                await asyncio.sleep(settings.download_delay_seconds)
-            try:
-                info = await self.get_collection_info(cid)
-                slug = str(info.get("slug") or "")
-                if slug:
-                    slugs[cid] = slug
-            except MakerWorldError as e:
-                # One shy collection must not fail the listing; the UI just
-                # loses the makerworld.com link for it.
-                logger.warning("slug lookup for collection %s failed: %s", cid, e)
-        return slugs
-
     async def list_my_collections(
         self,
         page_size: int = 50,
         max_designs_per_collection: int = 1000,
+        previous: dict[int, dict[str, Any]] | None = None,
+        progress: Callable[[int, int], None] | None = None,
     ) -> list[dict[str, Any]]:
         """All of the signed-in user's own collections.
 
         Returns a normalized list of
         {collection_id, title, slug, design_count, is_default, design_ids}.
 
-        The listlite endpoint returns the full collection list but embeds
-        NO designs and NO slugs, so this method enriches each collection:
-        the design-id list comes from the favorites/{cid}/designs pager
-        (without it the UI's "✓ all downloaded" could never trigger for
-        big collections — downloaded_count could never reach
-        design_count) and the slug via favorites/{cid}/withoutdesign.
-        Capped at max_designs_per_collection per collection so one
-        10,000-model collection can't turn into a crawl; a partial list
-        still shows correct n/m checkmarks for the ids we do have. A small
-        delay between paging requests keeps the anti-abuse layer (418) calm.
+        listlite returns the full collection list (fresh titles and
+        designCnt) but NO designs, so each collection's design ids come
+        from the favorites/{cid}/designs pager — capped at
+        max_designs_per_collection so one 10,000-model collection can't
+        turn into a crawl. `previous` ({collection_id: cached row}) makes
+        that incremental: a collection whose designCnt didn't change keeps
+        its cached ids, so a routine refresh costs one request plus one per
+        changed collection. Pass None to re-page everything.
+
+        Slugs are not fetched (that was one withoutdesign request per
+        collection): /collections/<id> redirects to the slugged page
+        (verified 2026-09-27), so links work without them; a cached slug
+        is carried over. `progress(done, total)` is called per collection.
         """
         data = await self.get_my_collections_page(limit=page_size)
-        hits = data.get("hits") or []
-        if not hits:
-            return []
-
-        # Slugs need one extra request per collection — collect the ids
-        # first so _slug_map can pace them politely.
-        collection_ids = [int(h.get("id") or 0) for h in hits]
-        collection_ids = [c for c in collection_ids if c]
-        slugs = await self._slug_map(collection_ids)
-
+        hits = [h for h in (data.get("hits") or []) if int(h.get("id") or 0)]
+        previous = previous or {}
         out: list[dict[str, Any]] = []
-        for hit in hits:
+        for done, hit in enumerate(hits, 1):
             collection_id = int(hit.get("id") or 0)
             design_count = int(hit.get("designCnt") or 0)
+            prev = previous.get(collection_id)
             design_ids: list[int] = []
-            if collection_id and design_count > 0 and max_designs_per_collection > 0:
+            if prev is not None and int(prev.get("design_count") or 0) == design_count:
+                design_ids = list(prev.get("design_ids") or [])
+            elif design_count > 0 and max_designs_per_collection > 0:
                 try:
                     design_ids = await self._collect_design_ids(
                         collection_id,
                         known=set(),
                         cap=min(design_count, max_designs_per_collection),
                     )
+                except CaptchaError:
+                    raise  # every further request would deepen the block
                 except MakerWorldError as e:
                     # Keep the collection with no ids rather than failing
                     # the whole listing over one paging hiccup.
@@ -635,13 +624,15 @@ class MakerWorldClient:
                 {
                     "collection_id": collection_id,
                     "title": str(hit.get("title") or ""),
-                    "slug": slugs.get(collection_id, ""),
+                    "slug": str((prev or {}).get("slug") or ""),
                     "design_count": design_count,
                     "is_default": bool(hit.get("isDefault")),
                     "design_ids": design_ids,
                 }
             )
-        return [c for c in out if c["collection_id"]]
+            if progress:
+                progress(done, len(hits))
+        return out
 
     async def _collect_design_ids(
         self,
@@ -750,9 +741,7 @@ class MakerWorldClient:
         try:
             with urllib.request.urlopen(req, timeout=120) as resp:
                 if resp.status != 200:
-                    raise MakerWorldError(
-                        f"Download failed with HTTP {resp.status_code}"
-                    )
+                    raise MakerWorldError(f"Download failed with HTTP {resp.status}")
                 size = 0
                 with open(dest_path, "wb") as f:
                     while True:
