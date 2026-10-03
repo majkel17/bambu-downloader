@@ -48,7 +48,8 @@ function wireEvents() {
   // Delegated clicks for lists rendered as innerHTML (survive re-renders).
   for (const [containerId, names] of [
     ['labelChips', ['set-lib-filter']],
-    ['modelGrid', ['download-file', 'show-profiles']],
+    ['modelGrid', ['download-file', 'show-profiles', 'delete-model']],
+    ['ignoredList', ['restore-ignored']],
     ['profilesList', ['download-profile']],
     ['skippedList', ['retry-skipped']],
     ['mineList', ['follow-mine']],
@@ -73,6 +74,10 @@ function wireEvents() {
       if (ev.target.matches('.interval select')) setPlatesMode(cid, ev.target.value);
     });
   }
+  const deleteModal = document.getElementById('deleteModal');
+  if (deleteModal) deleteModal.addEventListener('click', (ev) => {
+    if (ev.target === ev.currentTarget) closeDeleteModal();
+  });
   const profilesModal = document.getElementById('profilesModal');
   if (profilesModal) profilesModal.addEventListener('click', (ev) => {
     if (ev.target === ev.currentTarget) closeProfiles();
@@ -96,6 +101,10 @@ function handleAction(action, el) {
     'show-profiles': () => showProfiles(el.dataset.did),
     'download-profile': () => downloadProfile(el.dataset.did, el.dataset.pid, el),
     'profiles-close': () => closeProfiles(),
+    'delete-model': () => askDeleteModel(el.dataset),
+    'delete-cancel': () => closeDeleteModal(),
+    'delete-confirm': () => doDeleteModel(),
+    'restore-ignored': () => restoreIgnored(el.dataset.iid),
     'add-collection': () => addCollection(),
     'refresh-mine': () => refreshMyCollections(),
     'follow-mine': () => followMine(el.dataset.cid, el.dataset.slug),
@@ -111,6 +120,7 @@ function handleAction(action, el) {
     'token-login': () => doTokenLogin(),
     'logout': () => doLogout(),
     'refresh-status': () => loadAll(),
+    'pv-sync': () => pvSyncNow(),
     'api-save': () => saveApiKey(),
     'api-clear': () => clearApiKey(),
   };
@@ -220,11 +230,31 @@ function showTab(name) {
   if (name === 'activity') startEventPolling();
   else stopEventPolling();
   if (name === 'library') { loadModels(); loadLabels(); }
-  if (name === 'collections') { startMinePolling(); loadCollections(); loadSkipped(); }
+  if (name === 'collections') { startMinePolling(); loadCollections(); loadSkipped(); loadIgnored(); }
   else stopMinePolling();
 }
 
 // ------------------------------------------------------------------ status
+function renderPrintventory(p) {
+  const el = document.getElementById('pvStatus');
+  document.getElementById('pvSyncBtn').hidden = !(p && p.enabled);
+  if (!p || !p.enabled) { el.textContent = 'Not configured.'; return; }
+  const parts = [`${p.url} (sees downloads as ${p.path})`];
+  if (p.server_version) parts.push(`Printventory ${p.server_version}`);
+  parts.push(p.running ? 'sending…' : (p.pending ? `${p.pending} waiting to be sent` : 'up to date'));
+  if (p.last_run_at) parts.push(`last run ${fmtTime(p.last_run_at)}`);
+  el.textContent = parts.join(' · ') + (p.last_error ? ` — ⚠ ${p.last_error}` : '');
+}
+
+async function pvSyncNow() {
+  try {
+    const r = await api('/api/printventory/sync', { method: 'POST' });
+    toast(`Printventory: ${r.updated} updated, ${r.removed} removed` +
+      (r.waiting ? `, ${r.waiting} not catalogued yet` : ''), 'ok');
+  } catch (e) { toast(e.message, 'err'); }
+  loadStatus();
+}
+
 async function loadStatus() {
   try {
     const s = await api('/api/status');
@@ -244,6 +274,7 @@ async function loadStatus() {
     document.getElementById('sysInfo').textContent =
       `Downloads directory: ${s.download_dir} · ${s.model_count} models · ` +
       `${s.collection_count} collections · scheduler ${s.scheduler.running ? 'running' : 'stopped'}`;
+    renderPrintventory(s.printventory);
     // Download queue: queued/active items (Semaphore(2) can hold 2 active
     // plus any number queued behind it during a sync).
     const q = s.downloads || [];
@@ -365,9 +396,70 @@ function modelCard(m) {
     <div class="meta actions">
       <button class="ghost" data-action="download-file" data-id="${m.id}" data-name="${esc(m.filename)}">⬇ Download</button>
       <button class="ghost" data-action="show-profiles" data-did="${m.design_id}" title="Other print profiles of this model">⚙ Profiles</button>
+      <button class="ghost" data-action="delete-model" data-id="${m.id}" data-coll="${m.collection_id ? 1 : 0}" data-title="${esc(m.title + (m.profile_title ? ' — ' + m.profile_title : ''))}" title="Delete this file">🗑</button>
       <a class="mw-link" href="${esc(mwUrl)}" target="_blank" rel="noopener noreferrer">↗ MakerWorld</a>
     </div>
   </div>`;
+}
+
+// ------------------------------------------------------------ delete
+let pendingDelete = null;
+
+function askDeleteModel(ds) {
+  pendingDelete = ds.id;
+  document.getElementById('deleteModalText').textContent =
+    `Delete “${ds.title}” from the library and the disk?`;
+  // Only a collection download can come back on its own.
+  const fromColl = ds.coll === '1';
+  document.getElementById('deleteIgnoreRow').hidden = !fromColl;
+  document.getElementById('deleteIgnore').checked = fromColl;
+  document.getElementById('deleteModal').hidden = false;
+}
+
+function closeDeleteModal() {
+  document.getElementById('deleteModal').hidden = true;
+  pendingDelete = null;
+}
+
+async function doDeleteModel() {
+  const id = pendingDelete;
+  if (!id) return;
+  const ignore = document.getElementById('deleteIgnore').checked;
+  closeDeleteModal();
+  try {
+    await api(`/api/models/${id}?ignore=${ignore}`, { method: 'DELETE' });
+    toast(ignore ? "Deleted — it won't be downloaded again" : 'Deleted', 'ok');
+    loadModels();
+    loadLabels();
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+async function loadIgnored() {
+  try {
+    const r = await api('/api/ignored-models');
+    document.getElementById('ignoredCard').hidden = r.models.length === 0;
+    document.getElementById('ignoredCount').textContent = r.models.length || '';
+    document.getElementById('ignoredList').innerHTML = r.models.map(m => {
+      const pid = m.profile_id > 0 ? `#profileId-${m.profile_id}` : '';
+      const mw = `https://makerworld.com/en/models/${m.design_id}${pid}`;
+      const coll = m.collection_title ? ` · 🗂 ${esc(m.collection_title)}` : '';
+      return `
+      <div class="coll-item">
+        <a class="title" href="${esc(mw)}" target="_blank" rel="noopener noreferrer">${esc(m.title || 'Model #' + m.design_id)}</a>
+        ${m.profile_title ? `<span class="muted">⚙ ${esc(m.profile_title)}</span>` : ''}
+        <span class="muted">deleted ${new Date(m.created_at).toLocaleString()}${coll}</span>
+        <button class="ghost" data-action="restore-ignored" data-iid="${m.id}">Restore</button>
+      </div>`;
+    }).join('');
+  } catch (e) { console.error(e); }
+}
+
+async function restoreIgnored(iid) {
+  try {
+    await api(`/api/ignored-models/${iid}`, { method: 'DELETE' });
+    toast('The next sync may download it again', 'ok');
+    loadIgnored();
+  } catch (e) { toast(e.message, 'err'); }
 }
 
 // ------------------------------------------------------------ profiles

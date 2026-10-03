@@ -36,6 +36,10 @@ services:
       - BND_MAX_DOWNLOAD_ATTEMPTS=2
       # How long Library → Profiles reuses a model's profile list (minutes):
       # - BND_PROFILES_CACHE_MINUTES=15
+      # Printventory integration (README → Printventory); its URL and the
+      # path under which it sees ./downloads:
+      # - BND_PRINTVENTORY_URL=http://192.168.1.10:5000
+      # - BND_PRINTVENTORY_PATH=/mnt/bambu-backup
       # Activity-log retention (days / max entries; 0 = unlimited):
       - BND_EVENT_RETENTION_DAYS=14
       - BND_EVENT_MAX_ROWS=2500

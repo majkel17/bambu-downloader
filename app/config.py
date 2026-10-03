@@ -83,6 +83,16 @@ class Settings:
         self.profiles_cache_minutes: int = max(
             0, int(_env("BND_PROFILES_CACHE_MINUTES", "15"))
         )
+        # Optional Printventory integration: its base URL (e.g.
+        # http://192.168.1.10:5000; empty = off) and the path under which
+        # Printventory sees this app's downloads folder (e.g. a read-only
+        # mount at /mnt/bambu-backup; empty = same path as BND_DOWNLOAD_DIR).
+        self.printventory_url: str = (
+            _env("BND_PRINTVENTORY_URL", "").strip().rstrip("/")
+        )
+        self.printventory_path: str = (
+            _env("BND_PRINTVENTORY_PATH", "").strip().rstrip("/")
+        )
         # Copy the SQLite database to data/backup/ on boot (before the
         # scheduler touches it). Simple belt-and-suspenders for a NAS-ish
         # setup; keep the most recent copy.

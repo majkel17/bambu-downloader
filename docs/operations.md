@@ -84,6 +84,8 @@ import time in `app/config.py`).
 | `BND_DOWNLOAD_DELAY_SECONDS` | `3` | Gap between downloads / paging / backfill requests — the main anti-418 lever (0 disables) |
 | `BND_MY_COLLECTIONS_REFRESH_MINUTES` | `60` (floor 15) | Own-collections cache refresh cadence |
 | `BND_PROFILES_CACHE_MINUTES` | `15` | Library → Profiles reuses a design's profile list this long (in memory; 0 = always ask) |
+| `BND_PRINTVENTORY_URL` | — | Printventory base URL; empty = off (see README → Printventory) |
+| `BND_PRINTVENTORY_PATH` | `BND_DOWNLOAD_DIR` | Where Printventory sees the downloads folder (e.g. a read-only mount) |
 
 ### Safety & security
 
@@ -105,6 +107,9 @@ sensitive; the API-key gate exists because of this.
 | `GET /api/status` | Scheduler state, in-flight syncs, queue snapshot, token validity (tri-state) |
 | `POST /api/auth/login` / `verify` / `token` / `logout` | Account flows (password → email code / TOTP; token paste fallback) |
 | `POST /api/download`, `POST /api/resolve` | Download a URL / preview metadata+plates |
+| `DELETE /api/models/{id}?ignore=` | Delete one library row and its file (row id); `ignore=true` keeps syncs from re-downloading that profile |
+| `GET /api/ignored-models`, `DELETE /api/ignored-models/{id}` | Profiles deleted with ignore / restore one |
+| `POST /api/printventory/sync` | Send queued metadata and removals to Printventory now (409 when not configured); state in `GET /api/status` → `printventory` |
 | `GET /api/models/{design_id}/profiles`, `POST /api/models/{design_id}/profiles/{profile_id}/download` | A library design's print profiles (name, author, `community`, `downloaded`) / download one next to the existing file. Takes the MakerWorld design id |
 | `GET /api/models`, `/api/model-labels`, `/api/events` | Library grid (`?q=` server-side search), origin-label filter bar, activity log (SQLite, `?kind=download\|sync\|error`) |
 | `GET /api/models/{id}/file` | Download a stored model file (attachment; only paths inside the downloads root) |

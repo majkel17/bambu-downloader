@@ -178,6 +178,26 @@ levels off (~1 MB at the cap) rather than growing; no `VACUUM` needed.
 size and how many of its designs are in the library as of the last sync
 (kept when a sync fails before listing) — the basis of `/api/collections/stats`.
 
+### `ignored_profiles` — deleted, don't download again
+
+One row per `(design_id, profile_id)` the user deleted with "don't
+download again" (`profile_id` -1 = a row without one), plus title, profile
+name and collection for the UI. Syncs skip those profiles: in default mode
+a design with an ignored profile and nothing left in the library is skipped
+entirely; in author/all mode only the ignored profiles are. A manual
+download of the same profile, or Restore (`DELETE /api/ignored-models/{id}`),
+removes the row. `collection_stats.ignored` counts such designs so they
+don't show as missing.
+
+### Printventory queue — `models.pv_synced_at`, `pv_removals`
+
+`pv_synced_at` is NULL until a row's metadata reached Printventory; it is
+reset whenever the row's file moves (rename, collection relocation,
+re-download). `pv_removals` holds file paths deleted here (single delete or
+unfollow with files) whose Printventory entries are still to be removed.
+Both are drained by `PrintventorySync` (`app/printventory.py`) every
+minute when `BND_PRINTVENTORY_URL` is set.
+
 ### `download_failures` — give up on dead models
 
 One row per design that failed in a collection sync **because of the model
@@ -233,8 +253,12 @@ Details:
   walls"), useless in a file manager or Printventory sorted by name. The
   profile part is the instance title, else the API's `name` hint /
   `Content-Disposition` / URL; with nothing ASCII left, just the title.
-  Older files were renamed once at boot (`rename_model_files`, meta flag
-  `file_names_v2`), their current name standing in for the profile.
+  Latin accents are folded first (`_ascii_fold`: Unicode NFKD minus
+  combining marks, plus a table for letters that don't decompose — ß→ss,
+  ł→l, ø→o, æ→ae …); other scripts drop out. Older files are renamed once
+  at boot (`rename_model_files`, meta flag `file_names_v3`), their current
+  name standing in for the profile (a first-scheme `Title__Profile` stem
+  gives up its tail).
   The profile-download `name` carries no extension, so the real one is
   detected from the content (`_detect_extension`: 3MF = ZIP with a `3D/*.model`
   part; also zip/stl/step) and appended. A name already taken by another
