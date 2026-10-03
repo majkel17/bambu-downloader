@@ -421,6 +421,42 @@ class DownloadManager:
             logger.info("Added missing extensions to %d downloaded files", renamed)
         return renamed
 
+    def rename_model_files(self) -> int:
+        """One-time migration to <Design_title>__<Profile_name>.<ext> names
+        (see _model_filename); rows without a stored profile name keep their
+        current name (Bambu's profile name) as the profile part.
+
+        Local-only, idempotent, flag set after an error-free pass — like
+        fix_file_extensions, which must run first. Returns files renamed.
+        """
+        if self.db.get_meta("file_names_v2") == "1":
+            return 0
+        renamed = 0
+        failed = False
+        for row in self.db.model_files():
+            path = Path(row["file_path"])
+            if not path.is_file():
+                continue
+            stem = _model_filename(
+                row.get("title") or "", row.get("profile_title") or path.stem
+            )
+            if path.stem == stem or path.stem.startswith(stem + "-"):
+                continue  # already in the new scheme (maybe -<tag> deduped)
+            dest = _unique_path(path.with_name(stem + path.suffix), row["id"])
+            try:
+                path.rename(dest)
+            except OSError as e:
+                logger.warning("could not rename %s: %s", path, e)
+                failed = True
+                continue
+            self.db.set_model_file(row["id"], dest.name, str(dest))
+            renamed += 1
+        if not failed:
+            self.db.set_meta("file_names_v2", "1")
+        if renamed:
+            logger.info("Renamed %d downloaded files to Title__Profile", renamed)
+        return renamed
+
     def _client(self) -> MakerWorldClient:
         """Return the pooled API client for the stored token + region.
 
@@ -698,6 +734,10 @@ class DownloadManager:
                             "MakerWorld did not return a download URL for this model."
                         )
 
+                    profile_title = (
+                        str(instance.get("title") or "") or None if instance else None
+                    )
+
                     # Build destination: downloads/<collection>/<model>/
                     if dest_dir is None:
                         parts: list[str] = []
@@ -715,8 +755,12 @@ class DownloadManager:
                             download_url, tmp
                         )
                         final_name = _with_extension(
-                            _safe_filename(
-                                filename_hint or remote_name or str(design_id)
+                            _model_filename(
+                                title,
+                                profile_title
+                                or filename_hint
+                                or remote_name
+                                or str(design_id),
                             ),
                             _detect_extension(tmp),
                         )
@@ -748,9 +792,6 @@ class DownloadManager:
                     if collection_id and not coll_title:
                         coll = self.db.get_collection(collection_id)
                         coll_title = str((coll or {}).get("title") or "") or None
-                    profile_title = (
-                        str(instance.get("title") or "") or None if instance else None
-                    )
                     self.db.insert_model(
                         design_id=design_id,
                         profile_id=stored_profile_id,
@@ -1194,6 +1235,33 @@ def _detect_extension(path: Path) -> str:
     if head.startswith(b"ISO-10303-21"):
         return ".step"
     return ""
+
+
+_MODEL_EXTENSIONS = (".3mf", ".zip", ".stl", ".step", ".stp")
+
+
+def _name_part(text: str, limit: int) -> str:
+    """ASCII letters/digits/./- with single underscores between words."""
+    text = re.sub(r"[^A-Za-z0-9.-]+", "_", text)
+    return text.strip("_.-")[:limit].rstrip("_.-")
+
+
+def _model_filename(title: str, profile: str | None) -> str:
+    """<Design_title>__<Profile_name> (no extension), e.g.
+    Mini_Ghost_Tea_Light_Lantern__Ghost_Stand_No_AMS.
+
+    Bambu names the file after the print profile only ("0.2mm layer, 6
+    walls"), which says nothing in a file manager or Printventory sorted by
+    name; the design title in front groups a model's profiles together.
+    ASCII-only like _safe_filename (Windows/SMB-safe); a profile name with
+    nothing ASCII left (e.g. Chinese) leaves just the title.
+    """
+    profile = profile or ""
+    if profile.lower().endswith(_MODEL_EXTENSIONS):
+        profile = profile.rsplit(".", 1)[0]
+    head = _name_part(title, 80) or "model"
+    tail = _name_part(profile, 60)
+    return f"{head}__{tail}" if tail and tail != head else head
 
 
 def _with_extension(name: str, ext: str) -> str:

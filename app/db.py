@@ -380,11 +380,14 @@ class Database:
             return dict(row) if row else None
 
     def model_files(self) -> list[dict[str, Any]]:
-        """(id, filename, file_path) of every model row — for file migrations."""
+        """(id, filename, file_path, title, profile_title) of every model
+        row — for file migrations."""
         with self.connect() as conn:
             return [
                 dict(r)
-                for r in conn.execute("SELECT id, filename, file_path FROM models")
+                for r in conn.execute(
+                    "SELECT id, filename, file_path, title, profile_title FROM models"
+                )
             ]
 
     def set_model_paths(self, updates: list[tuple[int, str]]) -> None:

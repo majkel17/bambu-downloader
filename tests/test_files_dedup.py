@@ -150,7 +150,7 @@ async def test_concurrent_downloads_of_same_design_download_once(
     assert sorted(r["status"] for r in results) == ["downloaded", "exists"]
     assert len(_DownloadFakeClient.downloads) == 1
     saved = Path(next(r for r in results if r["status"] == "downloaded")["path"])
-    assert saved.name == "Plate_1.3mf"
+    assert saved.name == "Dice_Tower__Plate_1.3mf"
     assert saved.is_file()
     assert manager._design_locks == {}  # no lock leak
 
