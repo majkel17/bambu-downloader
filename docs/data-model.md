@@ -207,7 +207,7 @@ data/
 downloads/
   <collectionId>-<title>/      # followed collection, slugified
     <designId>-<title>/        # one folder per design
-      <filename>.3mf           # the model (name from Bambu / URL)
+      <Title>__<Profile>.3mf   # the model, one file per downloaded profile
       cover.webp               # local cover copy for offline /thumb
 ```
 
@@ -227,8 +227,14 @@ Details:
   a crash never leaves a truncated `.3mf` pretending to be complete.
 - Disk space is checked before each download (`BND_MIN_FREE_MB`, default
   500 MB; 0 disables) to avoid truncated writes on a full volume.
-- Filenames come from the API's `name` hint, the response's
-  `Content-Disposition`, or the URL — sanitized through `_safe_filename`.
+- Filenames are `<Design_title>__<Profile_name>` (`_model_filename`: ASCII
+  letters/digits/./-, words joined by `_`, title ≤ 80 and profile ≤ 60
+  chars). Bambu names files after the profile alone ("0.2mm layer, 6
+  walls"), useless in a file manager or Printventory sorted by name. The
+  profile part is the instance title, else the API's `name` hint /
+  `Content-Disposition` / URL; with nothing ASCII left, just the title.
+  Older files were renamed once at boot (`rename_model_files`, meta flag
+  `file_names_v2`), their current name standing in for the profile.
   The profile-download `name` carries no extension, so the real one is
   detected from the content (`_detect_extension`: 3MF = ZIP with a `3D/*.model`
   part; also zip/stl/step) and appended. A name already taken by another

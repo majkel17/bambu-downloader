@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from . import routes
 from .config import settings
 from .db import Database
-from .downloader import DownloadManager, set_event_store
+from .downloader import DownloadManager, add_event, set_event_store
 from .makerworld import (
     MakerWorldError,
     get_client,
@@ -104,6 +104,11 @@ async def lifespan(app: FastAPI):
     set_event_store(database)  # Activity log survives restarts from here on
     # Before the scheduler starts: no download may race the rename pass.
     await asyncio.to_thread(manager.fix_file_extensions)
+    renamed = await asyncio.to_thread(manager.rename_model_files)
+    if renamed:
+        await add_event(
+            "sync", f"Renamed {renamed} downloaded files to Model_title__Profile_name"
+        )
     scheduler.start()
     # Fetch missing metadata (cover, creator) for pre-existing models in
     # the background — must not block startup.
