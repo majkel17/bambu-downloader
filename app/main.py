@@ -145,9 +145,22 @@ app.include_router(routes.router)
 
 
 # ------------------------------------------------------------- static files
+class _RevalidatedStatic(StaticFiles):
+    """Static files the browser must revalidate (cheap 304 via ETag).
+
+    Without a Cache-Control header browsers cache app.js heuristically: an
+    updated, no-store index.html then ran next to a stale app.js (new
+    cards stayed empty after an upgrade until a hard reload)."""
+
+    async def get_response(self, path: str, scope):  # type: ignore[override]
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 _static_dir = Path(__file__).parent / "static"
 if _static_dir.exists():
-    app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
+    app.mount("/static", _RevalidatedStatic(directory=str(_static_dir)), name="static")
 
 # Thumbnails: served from disk when possible (each model folder has a
 # cover.webp), otherwise fetched from the MakerWorld CDN via the /thumb

@@ -160,8 +160,10 @@ library with a 3MF preview, tags and print history; this app fills it.
 Every minute, files not yet sent get `source` (the MakerWorld link) and a
 tag with the collection title (added, your tags stay); `designer` and
 `notes` (the profile name) are filled only when empty, so edits made in
-Printventory are kept. A file Printventory hasn't catalogued yet makes it
-scan just that model's folder. Settings → Printventory shows the state.
+Printventory are kept. Each run sends everything queued (a full library
+takes a few minutes) and logs what it did in Activity. A file Printventory
+hasn't catalogued yet makes it scan just that model's folder. Settings →
+Printventory shows the state.
 Note that Printventory's MCP endpoint has no authentication — anyone on
 your network can change its library — and is marked experimental upstream
 (tested with 2.2.10–2.2.16).

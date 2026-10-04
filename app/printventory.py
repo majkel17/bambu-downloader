@@ -37,7 +37,8 @@ from .db import Database
 logger = logging.getLogger(__name__)
 
 PROTOCOL_VERSION = "2025-03-26"
-BATCH = 100  # rows per run (each costs 2-4 calls on the LAN)
+BATCH = 100  # rows per DB read; a run keeps going until the queue is empty
+MAX_PER_RUN = 5000  # ...or this many rows (~6 min at the ~15 rows/s seen live)
 
 
 class PrintventoryError(Exception):
@@ -215,7 +216,7 @@ class PrintventorySync:
                 if str(e) != self.last_error:
                     from .downloader import add_event  # no import cycle at load
 
-                    await add_event("error", f"Printventory: {e}")
+                    await add_event("error", f"Printventory sync failed — {e}")
                 self.last_error = str(e)
                 raise
             finally:
@@ -228,47 +229,27 @@ class PrintventorySync:
 
     async def _run(self, client: Any) -> dict[str, int]:
         removed = 0
-        paths = self.db.pv_removals(BATCH)
-        if paths:
+        while removed < MAX_PER_RUN and (paths := self.db.pv_removals(BATCH)):
             mapped = [p for p in (self.map_path(x) for x in paths) if p]
             if mapped:
                 await client.call(
                     "remove_model", {"filePaths": mapped, "confirm": True}
                 )
             self.db.pv_removal_done(paths)
-            removed = len(paths)
+            removed += len(paths)
 
         updated = waiting = 0
         scanned: set[str] = set()
-        for row in self.db.pv_pending(BATCH):
-            path = self.map_path(row["file_path"])
-            if path is None:
-                self.db.pv_mark_synced(row["id"])  # nothing Printventory can see
-                continue
-            model = await client.call("get_model", {"filePath": path})
-            folder = str(PurePosixPath(path).parent)
-            if model is None and folder not in scanned:
-                # Not catalogued yet: scan just this design's folder rather
-                # than wait for Printventory's periodic STL Home scan.
-                scanned.add(folder)
-                await client.call("scan_directory", {"directory": folder})
-                model = await client.call("get_model", {"filePath": path})
-            if not isinstance(model, dict):
-                waiting += 1  # still unknown (path mapping? scan running?)
-                continue
-            fields: dict[str, Any] = {"filePath": path, "source": source_url(row)}
-            if not model.get("designer") and row.get("creator"):
-                fields["designer"] = row["creator"]
-            if not model.get("notes") and row.get("profile_title"):
-                fields["notes"] = row["profile_title"]
-            await client.call("update_model", fields)
-            if row.get("collection_title"):
-                await client.call(
-                    "add_model_tags",
-                    {"filePath": path, "tags": [row["collection_title"]]},
-                )
-            self.db.pv_mark_synced(row["id"])
-            updated += 1
+        after = 0  # rows left waiting stay queued: page past them by id
+        while updated + waiting < MAX_PER_RUN and (
+            rows := self.db.pv_pending(BATCH, after)
+        ):
+            after = rows[-1]["id"]
+            for row in rows:
+                if await self._send(client, row, scanned):
+                    updated += 1
+                else:
+                    waiting += 1
         if updated or removed:
             logger.info(
                 "Printventory: %d updated, %d removed, %d not catalogued yet",
@@ -276,7 +257,44 @@ class PrintventorySync:
                 removed,
                 waiting,
             )
+            from .downloader import add_event  # no import cycle at load
+
+            msg = f"Printventory: {updated} updated, {removed} removed"
+            await add_event(
+                "sync", msg + (f", {waiting} not catalogued yet" if waiting else "")
+            )
         return {"updated": updated, "waiting": waiting, "removed": removed}
+
+    async def _send(self, client: Any, row: dict[str, Any], scanned: set[str]) -> bool:
+        """Push one row's metadata; False when Printventory doesn't know
+        the file yet (the row stays queued)."""
+        path = self.map_path(row["file_path"])
+        if path is None:
+            self.db.pv_mark_synced(row["id"])  # nothing Printventory can see
+            return True
+        model = await client.call("get_model", {"filePath": path})
+        folder = str(PurePosixPath(path).parent)
+        if model is None and folder not in scanned:
+            # Not catalogued yet: scan just this design's folder rather
+            # than wait for Printventory's periodic STL Home scan.
+            scanned.add(folder)
+            await client.call("scan_directory", {"directory": folder})
+            model = await client.call("get_model", {"filePath": path})
+        if not isinstance(model, dict):
+            return False  # still unknown (path mapping? scan running?)
+        fields: dict[str, Any] = {"filePath": path, "source": source_url(row)}
+        if not model.get("designer") and row.get("creator"):
+            fields["designer"] = row["creator"]
+        if not model.get("notes") and row.get("profile_title"):
+            fields["notes"] = row["profile_title"]
+        await client.call("update_model", fields)
+        if row.get("collection_title"):
+            await client.call(
+                "add_model_tags",
+                {"filePath": path, "tags": [row["collection_title"]]},
+            )
+        self.db.pv_mark_synced(row["id"])
+        return True
 
     async def loop(self, interval: float = 60.0) -> None:
         """Background task: a run every `interval` seconds while enabled."""

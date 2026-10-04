@@ -947,14 +947,16 @@ class Database:
         return out
 
     # ---- Printventory sync bookkeeping ----
-    def pv_pending(self, limit: int) -> list[dict[str, Any]]:
-        """Rows whose metadata hasn't reached Printventory yet."""
+    def pv_pending(self, limit: int, after_id: int = 0) -> list[dict[str, Any]]:
+        """Rows whose metadata hasn't reached Printventory yet (by id, from
+        after_id on — a run pages past rows it had to leave queued)."""
         with self.connect() as conn:
             return [
                 dict(r)
                 for r in conn.execute(
-                    "SELECT * FROM models WHERE pv_synced_at IS NULL ORDER BY id LIMIT ?",
-                    (limit,),
+                    "SELECT * FROM models WHERE pv_synced_at IS NULL AND id > ?"
+                    " ORDER BY id LIMIT ?",
+                    (after_id, limit),
                 )
             ]
 
