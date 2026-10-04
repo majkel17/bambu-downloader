@@ -10,6 +10,7 @@ import re
 import shutil
 import sqlite3
 import time
+import unicodedata
 import zipfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -429,7 +430,7 @@ class DownloadManager:
         Local-only, idempotent, flag set after an error-free pass — like
         fix_file_extensions, which must run first. Returns files renamed.
         """
-        if self.db.get_meta("file_names_v2") == "1":
+        if self.db.get_meta("file_names_v3") == "1":
             return 0
         renamed = 0
         failed = False
@@ -437,8 +438,9 @@ class DownloadManager:
             path = Path(row["file_path"])
             if not path.is_file():
                 continue
+            title = row.get("title") or ""
             stem = _model_filename(
-                row.get("title") or "", row.get("profile_title") or path.stem
+                title, row.get("profile_title") or _profile_from_stem(title, path.stem)
             )
             if path.stem == stem or path.stem.startswith(stem + "-"):
                 continue  # already in the new scheme (maybe -<tag> deduped)
@@ -452,7 +454,7 @@ class DownloadManager:
             self.db.set_model_file(row["id"], dest.name, str(dest))
             renamed += 1
         if not failed:
-            self.db.set_meta("file_names_v2", "1")
+            self.db.set_meta("file_names_v3", "1")
         if renamed:
             logger.info("Renamed %d downloaded files to Title__Profile", renamed)
         return renamed
@@ -808,6 +810,8 @@ class DownloadManager:
                         profile_title=profile_title,
                     )
                     self.db.clear_failure(design_id)
+                    # Downloading it again (by hand) undoes "don't download again".
+                    self.db.unignore_profile(design_id, stored_profile_id)
                     origin = (
                         f" from “{coll_title}”" if coll_title else " (manual download)"
                     )
@@ -912,6 +916,8 @@ class DownloadManager:
         aborted: str | None = None
         skip = self.db.skipped_design_ids(settings.max_download_attempts)
         skipped = 0
+        # Profiles the user deleted and asked not to get back.
+        ignored = self.db.ignored_map()
         for hit in designs:
             design_id = int(hit.get("id") or 0)
             if not design_id:
@@ -919,11 +925,13 @@ class DownloadManager:
             if design_id in skip:
                 skipped += 1
                 continue
+            gone = ignored.get(design_id, set())
+            have_any = self.db.model_exists_any(design_id)
             if plates_mode in ("all", "author"):
                 # Enumerate every plate; already-stored (design, plate) pairs
                 # are skipped via model_exists, so the instances lookup only
                 # costs a round trip for designs that are already known.
-                if self.db.model_exists_any(design_id):
+                if have_any or gone:
                     try:
                         instances = await self._design_instances(design_id)
                         if plates_mode == "author":
@@ -942,17 +950,25 @@ class DownloadManager:
                     ]
                     plates = sorted({p for p in plates if p})
                     missing = [
-                        p for p in plates if not self.db.model_exists(design_id, p)
+                        p
+                        for p in plates
+                        if p not in gone and not self.db.model_exists(design_id, p)
                     ]
                     targets = [f"#profileId-{p}" for p in missing]
                     # An all-plates design with NO enumerated plates at all
                     # (unusual API shape): leave it to the default-plate path.
-                    if not plates and not self.db.design_fully_pinned(design_id, []):
+                    if (
+                        not plates
+                        and not gone
+                        and not self.db.design_fully_pinned(design_id, [])
+                    ):
                         targets = [""]
                 else:
                     targets = [""]
             else:
-                targets = [""] if not self.db.model_exists_any(design_id) else []
+                # Default mode: a design whose profile the user deleted (and
+                # ignored) stays gone.
+                targets = [""] if not have_any and not gone else []
             for fragment in targets:
                 plate = int(fragment.rsplit("-", 1)[-1]) if fragment else None
                 url = f"https://makerworld.com/en/models/{design_id}{fragment}"
@@ -1133,6 +1149,42 @@ class DownloadManager:
             label=base.get("collection_title"),
         )
 
+    def delete_model(self, model_row_id: int, ignore: bool) -> dict[str, Any]:
+        """Delete one library row and its file; `ignore` keeps syncs from
+        downloading that profile again. cover.webp and the design folder go
+        too once no other profile of the design lives there. Only files
+        inside the downloads root are touched. Blocking — run in a thread.
+        Returns the deleted row (KeyError when it doesn't exist)."""
+        row = self.db.get_model(model_row_id)
+        if not row:
+            raise KeyError(model_row_id)
+        root = Path(settings.download_dir).resolve()
+        path = Path(row["file_path"])
+        resolved = path.resolve()
+        if resolved.is_relative_to(root):
+            resolved.unlink(missing_ok=True)
+            folder = resolved.parent
+            others = [
+                r
+                for r in self.db.design_rows(row["design_id"])
+                if r["id"] != model_row_id
+                and Path(r["file_path"]).resolve().parent == folder
+            ]
+            if not others:
+                (folder / "cover.webp").unlink(missing_ok=True)
+                for d in (folder, folder.parent):
+                    if d == root or not d.is_relative_to(root):
+                        break
+                    try:
+                        d.rmdir()  # only when empty
+                    except OSError:
+                        break
+        self.db.delete_model(model_row_id)
+        if ignore:
+            self.db.ignore_profile(row)
+        self.db.pv_queue_removal([row["file_path"]])
+        return row
+
     async def _cached_instances(
         self, design_id: int
     ) -> tuple[str, list[dict[str, Any]]]:
@@ -1240,8 +1292,29 @@ def _detect_extension(path: Path) -> str:
 _MODEL_EXTENSIONS = (".3mf", ".zip", ".stl", ".step", ".stp")
 
 
-def _name_part(text: str, limit: int) -> str:
+# Letters NFKD can't split into "base letter + accent" (they're letters of
+# their own), spelled the way their languages transliterate them.
+_TRANSLIT = str.maketrans(
+    {
+        "ß": "ss", "ẞ": "SS", "ł": "l", "Ł": "L", "ø": "o", "Ø": "O",
+        "æ": "ae", "Æ": "AE", "œ": "oe", "Œ": "OE", "đ": "d", "Đ": "D",
+        "ð": "d", "Ð": "D", "þ": "th", "Þ": "Th", "\u0131": "i", "ħ": "h", "Ħ": "H",
+    }
+)  # fmt: skip
+
+
+def _ascii_fold(text: str) -> str:
+    """Latin-script text to ASCII: großer -> grosser, Łódź -> Lodz,
+    Crème brûlée -> Creme brulee. Other scripts (Cyrillic, CJK, ...) are
+    left alone — _name_part drops them."""
+    text = unicodedata.normalize("NFKD", text.translate(_TRANSLIT))
+    return "".join(ch for ch in text if not unicodedata.combining(ch))
+
+
+def _name_part(text: str, limit: int, fold: bool = True) -> str:
     """ASCII letters/digits/./- with single underscores between words."""
+    if fold:
+        text = _ascii_fold(text)
     text = re.sub(r"[^A-Za-z0-9.-]+", "_", text)
     return text.strip("_.-")[:limit].rstrip("_.-")
 
@@ -1253,8 +1326,9 @@ def _model_filename(title: str, profile: str | None) -> str:
     Bambu names the file after the print profile only ("0.2mm layer, 6
     walls"), which says nothing in a file manager or Printventory sorted by
     name; the design title in front groups a model's profiles together.
-    ASCII-only like _safe_filename (Windows/SMB-safe); a profile name with
-    nothing ASCII left (e.g. Chinese) leaves just the title.
+    ASCII-only like _safe_filename (Windows/SMB-safe), Latin accents
+    folded (_ascii_fold); a profile name with nothing ASCII left (e.g.
+    Chinese) leaves just the title.
     """
     profile = profile or ""
     if profile.lower().endswith(_MODEL_EXTENSIONS):
@@ -1262,6 +1336,19 @@ def _model_filename(title: str, profile: str | None) -> str:
     head = _name_part(title, 80) or "model"
     tail = _name_part(profile, 60)
     return f"{head}__{tail}" if tail and tail != head else head
+
+
+def _profile_from_stem(title: str, stem: str) -> str | None:
+    """The profile part of a file named before the profile name was
+    stored: a Title__Profile stem from the first (pre-transliteration)
+    scheme gives up its tail, a title-only one (maybe -<tag> deduped)
+    has none, and anything else is Bambu's original profile name."""
+    head = _name_part(title, 80, fold=False) or "model"
+    if stem.startswith(head + "__"):
+        return stem[len(head) + 2 :]
+    if stem == head or re.fullmatch(re.escape(head) + r"-\d+", stem):
+        return None
+    return stem
 
 
 def _with_extension(name: str, ext: str) -> str:

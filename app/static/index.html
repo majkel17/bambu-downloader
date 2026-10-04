@@ -206,6 +206,11 @@
       <p class="hint">Syncs stopped trying these after repeated failures — usually a model that was removed, made private or censored on MakerWorld. Retrying doesn't download immediately; the next sync of its collection tries once more.</p>
       <div id="skippedList"></div>
     </div>
+    <div class="card" id="ignoredCard" hidden>
+      <h2>🚫 Ignored models <span class="tag" id="ignoredCount"></span></h2>
+      <p class="hint">Profiles you deleted with "don't download again" — syncs skip them. Restore lets the next sync download one again; downloading it by hand does too.</p>
+      <div id="ignoredList"></div>
+    </div>
   </section>
 
   <!-- Activity tab -->
@@ -267,6 +272,12 @@
       </div>
     </div>
     <div class="card">
+      <h2>🗃 Printventory</h2>
+      <p class="muted" id="pvStatus">Not configured.</p>
+      <p class="hint">Optional: with <code>BND_PRINTVENTORY_URL</code> set, each downloaded file gets its MakerWorld link, author, profile name and a tag with its collection in Printventory (author and notes only when empty there — your edits stay), and deleted files leave its library. Sent in the background every minute.</p>
+      <button class="ghost" id="pvSyncBtn" data-action="pv-sync" hidden>Send now</button>
+    </div>
+    <div class="card">
       <h2>ℹ About</h2>
       <p class="muted" id="sysInfo"></p>
       <button class="ghost" data-action="refresh-status">Refresh status</button>
@@ -293,6 +304,22 @@
     <div id="profilesList"></div>
     <div class="row" style="justify-content:flex-end; margin-top:1rem">
       <button class="ghost" data-action="profiles-close">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Library → 🗑: delete one model file, optionally keep it from coming back -->
+<div class="modal-overlay" id="deleteModal" hidden>
+  <div class="card modal">
+    <h2>🗑 Delete model</h2>
+    <p class="muted" id="deleteModalText"></p>
+    <label class="row" id="deleteIgnoreRow" style="gap:0.5rem; align-items:center">
+      <input type="checkbox" id="deleteIgnore" checked>
+      Don't download it again on sync
+    </label>
+    <div class="row" style="justify-content:flex-end; margin-top:1rem">
+      <button class="ghost" data-action="delete-cancel">Cancel</button>
+      <button class="danger" data-action="delete-confirm">Delete file</button>
     </div>
   </div>
 </div>

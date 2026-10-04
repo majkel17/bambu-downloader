@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import time
 from datetime import datetime, timedelta
@@ -14,7 +15,7 @@ from pydantic import BaseModel
 
 from .config import settings
 from .db import Database
-from .downloader import DownloadManager, recent_events
+from .downloader import DownloadManager, add_event, recent_events
 from .makerworld import (
     AuthRequiredError,
     CaptchaError,
@@ -28,6 +29,7 @@ from .makerworld import (
     parse_model_url,
     release_client,
 )
+from .printventory import PrintventoryError, PrintventorySync
 from .scheduler import MIN_MINE_REFRESH_MINUTES, SyncScheduler, trigger_sync
 
 
@@ -66,18 +68,25 @@ router = APIRouter(prefix="/api", dependencies=[Depends(require_api_key)])
 db: Database  # set in init()
 manager: DownloadManager
 scheduler: SyncScheduler
+printventory: PrintventorySync
 
 
-def init(database: Database, dl_manager: DownloadManager, sched: SyncScheduler) -> None:
+def init(
+    database: Database,
+    dl_manager: DownloadManager,
+    sched: SyncScheduler,
+    pv: PrintventorySync | None = None,
+) -> None:
     """Wire the module-level singletons from main.py's lifespan.
 
     Routes import the module, not instances, to avoid import cycles; this is
     called once at startup before any request is served.
     """
-    global db, manager, scheduler
+    global db, manager, scheduler, printventory
     db = database
     manager = dl_manager
     scheduler = sched
+    printventory = pv or PrintventorySync(database)
 
 
 class LoginRequest(BaseModel):
@@ -197,7 +206,21 @@ async def status() -> dict[str, Any]:
         "collection_count": len(db.list_collections()),
         "scheduler": scheduler.status(),
         "downloads": manager.queue_status(),
+        "printventory": printventory.status(),
     }
+
+
+@router.post("/printventory/sync")
+async def printventory_sync() -> dict[str, Any]:
+    """Send queued metadata/removals to Printventory now (normally every
+    minute in the background). 409 when the integration is off."""
+    if not printventory.enabled:
+        raise HTTPException(status_code=409, detail="Printventory is not configured")
+    try:
+        result = await printventory.run_once()
+    except PrintventoryError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+    return {**result, "pending": db.pv_pending_count()}
 
 
 # -------------------------------------------------------------------- auth
@@ -414,6 +437,42 @@ _MEDIA_TYPES = {
     ".step": "model/step",
     ".zip": "application/zip",
 }
+
+
+@router.delete("/models/{model_id}")
+async def delete_model(model_id: int, ignore: bool = False) -> dict[str, Any]:
+    """Delete one library entry and its file (Library → 🗑). ignore=true
+    keeps syncs from downloading that profile again (listed under Ignored,
+    undone by Restore or a manual download). Its Printventory entry is
+    removed too when that integration is on."""
+    try:
+        row = await asyncio.to_thread(manager.delete_model, model_id, ignore)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail="Model not found") from e
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Could not delete: {e}") from e
+    which = f" — profile “{row['profile_title']}”" if row.get("profile_title") else ""
+    await add_event(
+        "sync",
+        f"Deleted “{row['title']}”{which}"
+        + (" — won't be downloaded again" if ignore else ""),
+        design_id=row["design_id"],
+    )
+    return {"ok": True, "ignored": ignore}
+
+
+@router.get("/ignored-models")
+async def ignored_models() -> dict[str, Any]:
+    """Profiles deleted with "don't download again"; syncs skip them."""
+    return {"models": db.ignored_profiles()}
+
+
+@router.delete("/ignored-models/{ignored_id}")
+async def restore_ignored(ignored_id: int) -> dict[str, Any]:
+    """Forget an ignore: the next sync may download that profile again."""
+    if not db.remove_ignored(ignored_id):
+        raise HTTPException(status_code=404, detail="Not ignored")
+    return {"ok": True}
 
 
 @router.get("/models/{model_id}/file")
@@ -655,6 +714,7 @@ async def delete_collection(
                 d.rmdir()
             except OSError:
                 pass
+        db.pv_queue_removal([r["file_path"] for r in rows])
         db.delete_models(collection_id)
     db.delete_collection(collection_id)
     return {"ok": True, "deleted_files": deleted_files, "failed": failed}
@@ -672,7 +732,7 @@ def _collection_stats() -> list[dict[str, Any]]:
                 "enabled": bool(c["enabled"]),
                 "syncing": manager.is_syncing(cid) or cid in scheduler.active,
                 "missing": (
-                    max(0, total - present - c["skipped"])
+                    max(0, total - present - c["skipped"] - c["ignored"])
                     if total is not None and present is not None
                     else None
                 ),

@@ -81,7 +81,7 @@ def test_rename_migration(db, tmp_path):
         assert r["file_path"].endswith(r["filename"])
         assert (tmp_path / r["file_path"]).is_file()
     assert not old1.exists() and not old2.exists() and done.exists()
-    assert db.get_meta("file_names_v2") == "1"
+    assert db.get_meta("file_names_v3") == "1"
     assert m.rename_model_files() == 0  # one-time
 
 
@@ -106,4 +106,36 @@ def test_failed_rename_is_retried_next_boot(db, tmp_path, monkeypatch):
 
     monkeypatch.setattr(dl.Path, "rename", boom)
     assert m.rename_model_files() == 0
-    assert db.get_meta("file_names_v2") is None
+    assert db.get_meta("file_names_v3") is None
+
+
+# ------------------------------------------------------- transliteration
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        ("16cm großer Pokal", "16cm_grosser_Pokal"),
+        ("Łódź Żółć", "Lodz_Zolc"),
+        ("Crème brûlée", "Creme_brulee"),
+        ("Smørrebrød Æble Œuvre", "Smorrebrod_AEble_OEuvre"),
+        ("Ñandú Çağrı", "Nandu_Cagri"),  # noqa: RUF001 — Turkish dotless i
+        ("Ёлка 多色", "model"),  # other scripts are dropped, as before
+    ],
+)
+def test_latin_letters_are_folded(title, expected):
+    assert dl._model_filename(title, None) == expected
+
+
+def test_v2_names_get_folded_once(db, tmp_path):
+    """Files named by the first scheme (accents dropped, no stored profile
+    name) keep their profile part — no Title__Title__profile."""
+    _row(db, tmp_path, 1, "16cm großer Pokal", "16cm_gro_er_Pokal__Kelch_0.2mm.3mf")
+    _row(db, tmp_path, 2, "Grumpy Candle", "Grumpy_Candle__0.2mm_layer.3mf")
+    _row(db, tmp_path, 3, "Żaba", "aba-7.3mf")
+    db.set_meta("file_names_v2", "1")
+    assert dl.DownloadManager(db).rename_model_files() == 2
+    names = {r["design_id"]: r["filename"] for r in db.list_models()}
+    assert names == {
+        1: "16cm_grosser_Pokal__Kelch_0.2mm.3mf",
+        2: "Grumpy_Candle__0.2mm_layer.3mf",  # untouched
+        3: "Zaba.3mf",
+    }

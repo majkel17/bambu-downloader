@@ -23,6 +23,7 @@ from .makerworld import (
     invalidate_shared_clients,
     release_client,
 )
+from .printventory import PrintventorySync
 from .scheduler import SyncScheduler
 
 logging.basicConfig(
@@ -100,7 +101,8 @@ async def lifespan(app: FastAPI):
     database = Database(settings.db_path)
     manager = DownloadManager(database)
     scheduler = SyncScheduler(database, manager)
-    routes.init(database, manager, scheduler)
+    printventory = PrintventorySync(database)
+    routes.init(database, manager, scheduler, printventory)
     set_event_store(database)  # Activity log survives restarts from here on
     # Before the scheduler starts: no download may race the rename pass.
     await asyncio.to_thread(manager.fix_file_extensions)
@@ -113,6 +115,8 @@ async def lifespan(app: FastAPI):
     # Fetch missing metadata (cover, creator) for pre-existing models in
     # the background — must not block startup.
     meta_task = asyncio.create_task(manager.backfill_metadata())
+    # Optional: push metadata to Printventory (a no-op loop when not set).
+    pv_task = asyncio.create_task(printventory.loop())
     logger.info(
         "Bambu Downloader ready — downloads: %s, db: %s",
         settings.download_dir,
@@ -126,6 +130,7 @@ async def lifespan(app: FastAPI):
         # runs this on SIGTERM/SIGINT (podman stop sends SIGTERM).
         logger.info("Shutting down — stopping scheduler…")
         meta_task.cancel()
+        pv_task.cancel()
         await scheduler.stop()
         # Release every pooled httpx connection so sockets don't outlive
         # the loop and trip 'Event loop is closed' warnings on shutdown.

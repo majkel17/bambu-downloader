@@ -78,6 +78,27 @@ CREATE TABLE IF NOT EXISTS download_failures (
     last_attempt_at TEXT NOT NULL
 );
 
+-- Profiles the user deleted from the library and doesn't want back: syncs
+-- skip them. profile_id -1 = a row without a profile id. A manual download
+-- of the same profile (or Restore in the UI) removes the row.
+CREATE TABLE IF NOT EXISTS ignored_profiles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    design_id INTEGER NOT NULL,
+    profile_id INTEGER NOT NULL,
+    collection_id INTEGER,
+    title TEXT,
+    profile_title TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE(design_id, profile_id)
+);
+
+-- Printventory: library entries to remove for files we deleted (paths as
+-- this app stores them; mapped when sent). Drained by the Printventory sync.
+CREATE TABLE IF NOT EXISTS pv_removals (
+    file_path TEXT PRIMARY KEY,
+    queued_at TEXT NOT NULL
+);
+
 -- Activity log shown in the UI's Activity tab. Pruned hourly by the
 -- scheduler (BND_EVENT_RETENTION_DAYS / BND_EVENT_MAX_ROWS); freed pages are
 -- reused, so the file levels off instead of growing forever.
@@ -168,6 +189,8 @@ class Database:
                 "ALTER TABLE collections ADD COLUMN last_sync_present INTEGER",
                 # The print profile's own name ("Ghost + Stand (No AMS)").
                 "ALTER TABLE models ADD COLUMN profile_title TEXT",
+                # When the row's metadata last reached Printventory (NULL = due).
+                "ALTER TABLE models ADD COLUMN pv_synced_at TEXT",
                 # Hot-path indexes (no-op when they exist). cover: looked up
                 # by every /thumb request; created_at: list_models' default
                 # sort; collection_id: the label/collection filters.
@@ -337,6 +360,7 @@ class Database:
                      collection_title=COALESCE(excluded.collection_title, models.collection_title),
                      creator=COALESCE(excluded.creator, models.creator),
                      profile_title=COALESCE(excluded.profile_title, models.profile_title),
+                     pv_synced_at=NULL,
                      updated_at=excluded.updated_at""",
                 (
                     design_id,
@@ -395,7 +419,8 @@ class Database:
         now = utcnow()
         with self.connect() as conn:
             conn.executemany(
-                "UPDATE models SET file_path = ?, updated_at = ? WHERE id = ?",
+                "UPDATE models SET file_path = ?, updated_at = ?, pv_synced_at = NULL"
+                " WHERE id = ?",
                 [(path, now, row_id) for row_id, path in updates],
             )
 
@@ -424,7 +449,8 @@ class Database:
         """Point a model row at a renamed file."""
         with self.connect() as conn:
             conn.execute(
-                "UPDATE models SET filename = ?, file_path = ?, updated_at = ? WHERE id = ?",
+                "UPDATE models SET filename = ?, file_path = ?, updated_at = ?,"
+                " pv_synced_at = NULL WHERE id = ?",
                 (filename, file_path, utcnow(), model_row_id),
             )
 
@@ -797,7 +823,12 @@ class Database:
                           c.last_sync_total AS total, c.last_sync_present AS present,
                           (SELECT COUNT(*) FROM download_failures f
                             WHERE f.collection_id = c.collection_id
-                              AND {_SKIPPED_SQL}) AS skipped
+                              AND {_SKIPPED_SQL}) AS skipped,
+                          (SELECT COUNT(DISTINCT i.design_id) FROM ignored_profiles i
+                            WHERE i.collection_id = c.collection_id
+                              AND NOT EXISTS (SELECT 1 FROM models m
+                                              WHERE m.design_id = i.design_id)
+                          ) AS ignored
                    FROM collections c ORDER BY c.created_at DESC""",
                 (max_attempts, max_attempts),
             ).fetchall()
@@ -856,6 +887,115 @@ class Database:
         with self.connect() as conn:
             conn.execute(
                 "DELETE FROM collections WHERE collection_id = ?", (collection_id,)
+            )
+
+    # ---- deleting single models / ignored profiles ----
+    def delete_model(self, model_row_id: int) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM models WHERE id = ?", (model_row_id,))
+
+    def ignore_profile(self, row: dict[str, Any]) -> None:
+        """Remember a deleted library row's (design, profile) so syncs skip it."""
+        pid = row.get("profile_id")
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO ignored_profiles(design_id, profile_id, collection_id,
+                       title, profile_title, created_at) VALUES(?,?,?,?,?,?)
+                   ON CONFLICT(design_id, profile_id) DO NOTHING""",
+                (
+                    row["design_id"],
+                    -1 if pid is None else pid,
+                    row.get("collection_id"),
+                    row.get("title"),
+                    row.get("profile_title"),
+                    utcnow(),
+                ),
+            )
+
+    def unignore_profile(self, design_id: int, profile_id: int | None) -> bool:
+        with self.connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM ignored_profiles WHERE design_id = ? AND profile_id = ?",
+                (design_id, -1 if profile_id is None else profile_id),
+            )
+            return cur.rowcount > 0
+
+    def remove_ignored(self, ignored_id: int) -> bool:
+        with self.connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM ignored_profiles WHERE id = ?", (ignored_id,)
+            )
+            return cur.rowcount > 0
+
+    def ignored_profiles(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            return [
+                dict(r)
+                for r in conn.execute(
+                    """SELECT i.*, c.title AS collection_title FROM ignored_profiles i
+                       LEFT JOIN collections c ON c.collection_id = i.collection_id
+                       ORDER BY i.created_at DESC"""
+                )
+            ]
+
+    def ignored_map(self) -> dict[int, set[int]]:
+        """{design_id: {profile_id, ...}} for syncs (-1 = profile-less row)."""
+        out: dict[int, set[int]] = {}
+        with self.connect() as conn:
+            for r in conn.execute("SELECT design_id, profile_id FROM ignored_profiles"):
+                out.setdefault(r["design_id"], set()).add(r["profile_id"])
+        return out
+
+    # ---- Printventory sync bookkeeping ----
+    def pv_pending(self, limit: int) -> list[dict[str, Any]]:
+        """Rows whose metadata hasn't reached Printventory yet."""
+        with self.connect() as conn:
+            return [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT * FROM models WHERE pv_synced_at IS NULL ORDER BY id LIMIT ?",
+                    (limit,),
+                )
+            ]
+
+    def pv_pending_count(self) -> int:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT (SELECT COUNT(*) FROM models WHERE pv_synced_at IS NULL)"
+                " + (SELECT COUNT(*) FROM pv_removals) AS n"
+            ).fetchone()
+            return int(row["n"])
+
+    def pv_mark_synced(self, model_row_id: int) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE models SET pv_synced_at = ? WHERE id = ?",
+                (utcnow(), model_row_id),
+            )
+
+    def pv_queue_removal(self, file_paths: list[str]) -> None:
+        now = utcnow()
+        with self.connect() as conn:
+            conn.executemany(
+                "INSERT OR IGNORE INTO pv_removals(file_path, queued_at) VALUES(?, ?)",
+                [(p, now) for p in file_paths],
+            )
+
+    def pv_removals(self, limit: int) -> list[str]:
+        with self.connect() as conn:
+            return [
+                r["file_path"]
+                for r in conn.execute(
+                    "SELECT file_path FROM pv_removals ORDER BY queued_at LIMIT ?",
+                    (limit,),
+                )
+            ]
+
+    def pv_removal_done(self, file_paths: list[str]) -> None:
+        with self.connect() as conn:
+            conn.executemany(
+                "DELETE FROM pv_removals WHERE file_path = ?",
+                [(p,) for p in file_paths],
             )
 
     def delete_models(self, collection_id: int) -> int:

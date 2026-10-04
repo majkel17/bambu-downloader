@@ -93,6 +93,16 @@ Note: `podman unshare chown` makes the dirs owned by your subuid range — `ls -
 - **Removed/hidden designs:** MakerWorld still counts them in a collection but
   no longer lists them, so they can't be downloaded; the UI shows them as
   "+ N removed or hidden on MakerWorld".
+- **Deleting:** 🗑 on a Library card deletes that file. For a model from a
+  followed collection, "Don't download it again on sync" (on by default)
+  keeps the next sync from bringing it back; such profiles are listed under
+  Collections → Ignored models with a Restore button (downloading it by
+  hand also restores it).
+- **Printventory:** set `BND_PRINTVENTORY_URL` (and `BND_PRINTVENTORY_PATH`)
+  to have every download's MakerWorld link, author, profile name and a tag
+  with its collection written into
+  [Printventory](https://github.com/TechJeeper/Printventory) through its MCP
+  endpoint, and deleted files removed from its library — see below.
 - **Signing out** keeps your files, library and followed collections; syncs
   pause until you sign in again.
 - Unfollowing a collection asks whether to keep or delete its files.
@@ -129,6 +139,32 @@ Environment variables (all optional — defaults shown):
 | `BND_EVENT_MAX_ROWS` | `5000` | …and only the newest N are kept (~1 MB of SQLite). `0` = no cap |
 | `BND_MAX_DOWNLOAD_ATTEMPTS` | `3` | Syncs skip a model after this many failures caused by the model itself (404 / private / no download URL); a design with **no print profile** (STL/CAD only) is skipped after the first failure. Network, CAPTCHA and sign-in problems don't count. Skipped models are listed in Collections with a Retry button. `0` = retry forever |
 | `BND_PROFILES_CACHE_MINUTES` | `15` | How long Library → Profiles reuses a model's profile list before asking MakerWorld again. `0` = always ask |
+| `BND_PRINTVENTORY_URL` | — | Printventory base URL (e.g. `http://192.168.1.10:5000`); empty = integration off |
+| `BND_PRINTVENTORY_PATH` | `BND_DOWNLOAD_DIR` | Path under which Printventory sees the downloads folder |
+
+## Printventory
+
+[Printventory](https://github.com/TechJeeper/Printventory) is a 3D-model
+library with a 3MF preview, tags and print history; this app fills it.
+
+1. Mount this app's `downloads/` into the Printventory container
+   **read-only** and make it its STL Home, e.g.
+   `- /srv/bambu-downloader/downloads:/mnt/bambu-backup:ro` and
+   `STL_HOME=/mnt/bambu-backup`. Read-only on purpose: a file deleted on
+   Printventory's side would just be downloaded again by the next sync —
+   delete in this app instead.
+2. In this app: `BND_PRINTVENTORY_URL=http://<printventory-host>:5000` and
+   `BND_PRINTVENTORY_PATH=/mnt/bambu-backup` (where Printventory sees the
+   folder).
+
+Every minute, files not yet sent get `source` (the MakerWorld link) and a
+tag with the collection title (added, your tags stay); `designer` and
+`notes` (the profile name) are filled only when empty, so edits made in
+Printventory are kept. A file Printventory hasn't catalogued yet makes it
+scan just that model's folder. Settings → Printventory shows the state.
+Note that Printventory's MCP endpoint has no authentication — anyone on
+your network can change its library — and is marked experimental upstream
+(tested with 2.2.10–2.2.16).
 
 ## Home Assistant
 
