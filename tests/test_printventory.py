@@ -205,7 +205,9 @@ async def test_down_printventory_reports_once_and_keeps_the_queue(setup, db):
             await sync.run_once()
     assert "unreachable" in sync.status()["last_error"]
     errors = [
-        e for e in dl.recent_events(10) if e["message"].startswith("Printventory:")
+        e
+        for e in dl.recent_events(10, "error")
+        if e["message"].startswith("Printventory sync failed")
     ]
     assert len(errors) == 1  # not once per minute
     assert db.pv_pending_count() == 1
@@ -260,3 +262,36 @@ def test_routes(app_client, monkeypatch):
     monkeypatch.setattr(routes.settings, "printventory_url", "")
     assert client.get("/api/status").json()["printventory"]["enabled"] is False
     assert client.post("/api/printventory/sync").status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_one_run_drains_the_whole_queue(setup, db, monkeypatch):
+    """Batches are read until the queue is empty (live: ~100 rows in 7 s,
+    so waiting a minute per hundred was needless); rows Printventory doesn't
+    know are paged past, not retried in a loop."""
+    import app.downloader as dl
+
+    monkeypatch.setattr(pv, "BATCH", 3)
+    sync, fake, add = setup
+    fake.catalogue_on_scan = False
+    for i in range(7):
+        _, p = add(i + 1, f"7-h/{i}-m/M{i}__x.3mf")
+        if i != 3:
+            fake.models[p] = {"filePath": p}
+    assert await sync.run_once() == {"updated": 6, "waiting": 1, "removed": 0}
+    assert db.pv_pending_count() == 1
+    last = dl.recent_events(1)[0]
+    assert last["message"] == "Printventory: 6 updated, 0 removed, 1 not catalogued yet"
+    # A run that changes nothing leaves no Activity entry.
+    await sync.run_once()
+    assert dl.recent_events(1)[0]["message"] == last["message"]
+    assert (
+        len([e for e in dl.recent_events(20) if e["message"] == last["message"]]) == 1
+    )
+
+
+def test_static_files_are_revalidated(app_client):
+    client, _, _ = app_client
+    r = client.get("/static/app.js")
+    assert r.status_code == 200
+    assert r.headers["cache-control"] == "no-cache"
