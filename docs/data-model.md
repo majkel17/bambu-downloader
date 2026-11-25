@@ -265,6 +265,10 @@ Details:
   plate gets `-<profileId>` instead of being overwritten. Files saved before
   this fix are renamed once at boot (`fix_file_extensions`, meta flag
   `file_ext_migrated`).
+- A download that isn't a model file is discarded. Rows whose file is JSON
+  (print settings saved between Bambu's 2026-11-03 API change and the fix)
+  are downloaded again at boot (`repair_broken_downloads`); the old file
+  goes only once the model is on disk, and failures are retried next boot.
 - Concurrency: `download_model` takes a per-design lock and re-checks the
   library under it, and `sync_collection` refuses to run a collection that
   is already syncing (scheduled and manual syncs share `_syncing`) — so a

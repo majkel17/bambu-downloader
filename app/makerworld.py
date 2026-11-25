@@ -16,7 +16,12 @@ Endpoints verified against live traffic on 2026-09-11:
 - Plate instances:  GET  {mw}/api/v1/design-service/design/{designId}/instances (anon ok)
 - Model download:  GET  {mw}/api/v1/design-service/design/{designId}/model     (auth)
 - Plate 3MF:       GET  {mw}/api/v1/design-service/instance/{instanceId}/f3mf  (auth)
+- Instance DL:      GET  {bambu_api}/v1/design-service/instance/{instanceId}/f3mf?type=download  (auth)
+                     {"name", "url"} — the primary download path since
+                     2026-11-03; instanceId is the instance's id, not profileId
 - Profile DL:      GET  {bambu_api}/v1/iot-service/api/user/profile/{profileId}?model_id=  (auth)
+                     since 2026-11-03 answers 200 with an EMPTY "url" (the body
+                     still links print-settings JSON); fallback only
 - Collections tab: GET  {mw}/api/v1/design-service/favorites-collections/tab
                      (auth; MakerWorld's CURATED official tab bar — NOT the
                      user's collections; documented so nobody picks it again)
@@ -474,30 +479,60 @@ class MakerWorldClient:
             f"/api/v1/design-service/instance/{instance_id}/f3mf", auth=True
         )
 
+    async def get_instance_manifest(self, instance_id: int) -> dict[str, Any]:
+        """Signed 3MF download link for a design instance, via Bambu Cloud.
+
+        GET {bambu_api}/v1/design-service/instance/{instanceId}/f3mf
+        ?type=download with the stored Bearer token. ``instance_id`` is the
+        ``id`` of an instances hit, NOT its ``profileId``.
+
+        The primary download path since 2026-11-03, when the iot-service
+        profile endpoint stopped returning a link (same fix as Bambuddy,
+        maziggy/bambuddy#3447). A 403 is ForbiddenError: it is about this
+        model, so it must not abort a whole sync as a sign-in problem.
+
+        Returns {"url": "...", "name": "..."} — the URL is short-lived.
+        """
+        return await self._bambu_manifest(
+            f"/v1/design-service/instance/{instance_id}/f3mf",
+            {"type": "download"},
+            forbidden=ForbiddenError,
+        )
+
     async def get_profile_download(
         self, profile_id: int, model_id: str
     ) -> dict[str, Any]:
-        """Fetch the signed 3MF download manifest via Bambu's iot-service.
+        """Fetch the 3MF download manifest via Bambu's iot-service.
 
         GET {bambu_api}/v1/iot-service/api/user/profile/{profileId}?model_id={modelId}
         with the stored Bearer token. ``model_id`` is the design's ALPHANUMERIC
         id (e.g. "US2bb73b106683e5" — the ``modelId`` field of the design
         payload), NOT the numeric design id.
 
-        This is the reliable download path (per Bambuddy / YASTL#51): the
-        makerworld.com design/instance download endpoints are dead for newer
-        models (HTTP 400) and are cookie-gated in browsers. This endpoint
-        lives on api.bambulab.com (not Cloudflare-challenged) and mints the
-        signed CDN URL from the same long-lived bearer the user logs in with.
-
-        Returns {"url": "...", "name": "..."} — the URL is short-lived.
+        Fallback for get_instance_manifest: since 2026-11-03 it answers
+        "success" with an empty top-level ``url``. Only that field is the
+        model file — links deeper in the body are print-settings JSON.
         """
+        return await self._bambu_manifest(
+            f"/v1/iot-service/api/user/profile/{profile_id}",
+            {"model_id": str(model_id)},
+            forbidden=AuthRequiredError,
+        )
+
+    async def _bambu_manifest(
+        self,
+        path: str,
+        params: dict[str, str],
+        forbidden: type[MakerWorldError],
+    ) -> dict[str, Any]:
+        """GET a Bambu Cloud download manifest with the stored Bearer token;
+        ``forbidden`` is the error a 403 maps to."""
         if not self.auth_token:
             raise AuthRequiredError("Sign in to MakerWorld first (Settings → Login).")
         try:
             resp = await self._client.get(
-                f"{self.bambu_api}/v1/iot-service/api/user/profile/{profile_id}",
-                params={"model_id": str(model_id)},
+                f"{self.bambu_api}{path}",
+                params=params,
                 headers={"Authorization": f"Bearer {self.auth_token}"},
             )
         except httpx.HTTPError as e:
@@ -506,15 +541,18 @@ class MakerWorldClient:
             raise CaptchaError()
         if resp.status_code == 401:
             raise AuthExpiredError("Your Bambu sign-in has expired. Sign in again.")
+        data = _safe_json(resp)
         if resp.status_code == 403:
-            raise AuthRequiredError("Sign in to MakerWorld first (Settings → Login).")
+            detail = data.get("error") if isinstance(data, dict) else None
+            raise forbidden(
+                f"Bambu Cloud refused the download ({detail or 'HTTP 403'})"
+            )
         if resp.status_code == 404:
             raise NotFoundError("Profile not found on Bambu Cloud.")
         if resp.status_code != 200:
             raise MakerWorldError(
                 f"Bambu Cloud returned HTTP {resp.status_code} for the download manifest"
             )
-        data = _safe_json(resp)
         if isinstance(data, dict):
             return data
         raise MakerWorldError("Unexpected download manifest payload")

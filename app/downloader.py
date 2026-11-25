@@ -12,7 +12,7 @@ import sqlite3
 import time
 import unicodedata
 import zipfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,7 +21,6 @@ from typing import Any
 from .config import settings
 from .db import Database
 from .makerworld import (
-    AuthExpiredError,
     AuthRequiredError,
     CaptchaError,
     ForbiddenError,
@@ -459,6 +458,85 @@ class DownloadManager:
             logger.info("Renamed %d downloaded files to Title__Profile", renamed)
         return renamed
 
+    def _json_downloads(self) -> list[int]:
+        """Ids of rows whose saved "model" is a JSON document. Blocking."""
+        root = Path(settings.download_dir).resolve()
+        return [
+            row["id"]
+            for row in self.db.model_files()
+            if Path(row["file_path"]).resolve().is_relative_to(root)
+            and _is_json_file(Path(row["file_path"]))
+        ]
+
+    async def repair_broken_downloads(self) -> int:
+        """Download again every model saved as print-settings JSON.
+
+        From 2026-11-03 until the download path was fixed, the profile
+        manifest's empty `url` made us follow a settings link instead. Such
+        rows look downloaded, so no sync would ever replace them. A row and
+        its file are only touched once the real model is on disk; whatever
+        fails stays and is retried at the next start. Returns files repaired.
+        """
+        broken = await asyncio.to_thread(self._json_downloads)
+        if not broken:
+            return 0
+        await add_event(
+            "sync",
+            f"{len(broken)} downloaded file(s) contain JSON instead of a model "
+            "— downloading them again",
+        )
+        repaired = 0
+        for attempt, row_id in enumerate(broken):
+            if attempt and settings.download_delay_seconds > 0:
+                await asyncio.sleep(settings.download_delay_seconds)
+            try:
+                try:
+                    repaired += await self._redownload(row_id)
+                except AuthRequiredError:
+                    if not await self.try_token_refresh():
+                        raise
+                    repaired += await self._redownload(row_id)
+            except (AuthRequiredError, CaptchaError) as e:
+                await add_event(
+                    "error",
+                    f"Repair stopped after {repaired} of {len(broken)} file(s); "
+                    f"it resumes at the next start — {e}",
+                )
+                break
+            except (MakerWorldError, OSError) as e:
+                row = self.db.get_model(row_id) or {}
+                await add_event(
+                    "error",
+                    f"Could not repair “{row.get('title')}” — {e}",
+                    design_id=row.get("design_id"),
+                )
+        if repaired:
+            await add_event("sync", f"Repaired {repaired} downloaded file(s)")
+        return repaired
+
+    async def _redownload(self, row_id: int) -> bool:
+        """Replace one broken row's file; False if it needs no repair now."""
+        # Re-read: a sync may have moved the folder, or the user deleted it.
+        row = self.db.get_model(row_id)
+        if not row or not _is_json_file(Path(row["file_path"])):
+            return False
+        old = Path(row["file_path"])
+        pid = row.get("profile_id")
+        fragment = f"#profileId-{pid}" if pid else ""
+        result = await self.download_model(
+            f"https://makerworld.com/en/models/{row['design_id']}{fragment}",
+            collection_id=row.get("collection_id"),
+            dest_dir=old.parent,
+            label=row.get("collection_title"),
+            replace=True,
+        )
+        if result["profile_id"] != pid:
+            self.db.delete_model(row_id)  # stored as a new row
+        if Path(result["path"]) != old:
+            old.unlink(missing_ok=True)
+            self.db.pv_queue_removal([str(old)])
+        return True
+
     def _client(self) -> MakerWorldClient:
         """Return the pooled API client for the stored token + region.
 
@@ -614,6 +692,7 @@ class DownloadManager:
         subfolder: str | None = None,
         dest_dir: Path | None = None,
         label: str | None = None,
+        replace: bool = False,
     ) -> dict[str, Any]:
         """Download a model by URL. Returns a summary dict.
 
@@ -621,11 +700,13 @@ class DownloadManager:
         file still exists on disk, it is skipped. `dest_dir` / `label`
         override the folder and origin label (an extra profile of a design
         already in the library goes next to it — see download_profile).
+        `replace` downloads even though the row exists (repairing a broken
+        file), and then only the very profile asked for.
         """
         design_id, profile_id = parse_model_url(url)
 
         exists = {"status": "exists", "design_id": design_id, "profile_id": profile_id}
-        if self._have(design_id, profile_id):
+        if not replace and self._have(design_id, profile_id):
             return exists
 
         self.downloads[design_id] = {"state": "queued"}
@@ -635,7 +716,7 @@ class DownloadManager:
             # followed collections); the re-check under it lets the loser
             # see the winner's row instead of downloading a second copy.
             async with self._design_lock(design_id), self._sem:
-                if self._have(design_id, profile_id):
+                if not replace and self._have(design_id, profile_id):
                     return exists
                 self.downloads[design_id] = {"state": "active"}
                 client = self._client()
@@ -655,55 +736,78 @@ class DownloadManager:
                     instance = None
                     if profile_id:
                         for inst in instances:
-                            if int(inst.get("profileId") or 0) == profile_id:
+                            if _instance_profile_id(inst) == profile_id:
                                 instance = inst
                                 break
+                    if instance is None and profile_id and replace:
+                        raise NotFoundError(
+                            "MakerWorld no longer lists this print profile."
+                        )
                     if instance is None and instances:
                         instance = instances[0]
 
                     # --- download URL resolution --------------------------------
-                    # Primary: Bambu iot-service profile download (works for all
-                    # models incl. new ones; on api.bambulab.com, no CAPTCHA
-                    # pressure). Legacy makerworld.com endpoints are dead for
-                    # newer designs (HTTP 400) but kept as fallbacks for old ones.
+                    # Signed in: ask Bambu Cloud (api.bambulab.com, no CAPTCHA
+                    # pressure) for the instance's link, then the profile's.
+                    # The makerworld.com endpoints below are only for the
+                    # cases where Bambu Cloud can't be asked at all — they are
+                    # cookie-gated and their "please log in" would abort a sync.
                     download_url: str | None = None
                     filename_hint: str | None = None
                     alphanumeric_model_id = design.get("modelId")
+                    inst_id = int(instance.get("id") or 0) if instance else 0
                     inst_profile_id = (
                         int(instance.get("profileId") or 0) if instance else 0
                     )
-                    if (
-                        self.db.get_meta("bambu_token")
-                        and inst_profile_id
-                        and alphanumeric_model_id
-                    ):
-                        try:
-                            manifest = await client.get_profile_download(
-                                inst_profile_id, str(alphanumeric_model_id)
+                    sources: list[Callable[[], Awaitable[dict[str, Any]]]] = []
+                    if self.db.get_meta("bambu_token"):
+                        if inst_id:
+                            sources.append(
+                                lambda: client.get_instance_manifest(inst_id)
                             )
-                            download_url = _find_url(manifest)
+                        if inst_profile_id and alphanumeric_model_id:
+                            sources.append(
+                                lambda: client.get_profile_download(
+                                    inst_profile_id, str(alphanumeric_model_id)
+                                )
+                            )
+                    refusal: MakerWorldError | None = None
+                    for fetch_manifest in sources:
+                        try:
+                            manifest = await fetch_manifest()
+                        except (AuthRequiredError, CaptchaError):
+                            raise
+                        except MakerWorldError as e:
+                            logger.warning(
+                                "download manifest failed for %s (profile %s): %s",
+                                design_id,
+                                inst_profile_id,
+                                e,
+                            )
+                            refusal = refusal or e
+                            continue
+                        download_url = _manifest_url(manifest)
+                        if download_url:
                             if (
                                 isinstance(manifest.get("name"), str)
                                 and manifest["name"]
                             ):
                                 filename_hint = manifest["name"]
-                        except (AuthRequiredError, AuthExpiredError):
-                            raise
-                        except CaptchaError:
-                            raise
-                        except (NotFoundError, MakerWorldError) as e:
-                            logger.warning(
-                                "profile download failed for %s (profile %s): %s",
-                                design_id,
-                                inst_profile_id,
-                                e,
-                            )
+                            break
+                    if sources and not download_url:
+                        if refusal:
+                            raise refusal
+                        # An answer without a link means the API changed, not
+                        # that the model is bad: don't count it against it.
+                        raise MakerWorldError(
+                            "Bambu Cloud returned no download link for this model "
+                            "— its API may have changed."
+                        )
                     # Fallback 1: legacy per-instance endpoint (old models only).
                     if not download_url and instance:
-                        inst_id = int(instance.get("id") or 0)
                         try:
                             dl = await client.get_instance_download(inst_id)
-                            download_url = _find_url(dl)
+                            download_url = _manifest_url(dl)
                         except CaptchaError:
                             raise
                         except (AuthRequiredError, MakerWorldError) as e:
@@ -714,7 +818,7 @@ class DownloadManager:
                     if not download_url:
                         try:
                             dl = await client.get_design_model_download(design_id)
-                            download_url = _find_url(dl)
+                            download_url = _manifest_url(dl)
                         except AuthRequiredError:
                             # Preserve the auth signal so syncs abort early instead
                             # of failing per-model 68 times.
@@ -756,6 +860,12 @@ class DownloadManager:
                         size, remote_name = await client.download_file(
                             download_url, tmp
                         )
+                        extension = _detect_extension(tmp)
+                        if extension not in _MODEL_EXTENSIONS:
+                            raise MakerWorldError(
+                                "MakerWorld sent a file that is not a 3MF or other "
+                                "model file — nothing was saved."
+                            )
                         final_name = _with_extension(
                             _model_filename(
                                 title,
@@ -764,7 +874,7 @@ class DownloadManager:
                                 or remote_name
                                 or str(design_id),
                             ),
-                            _detect_extension(tmp),
+                            extension,
                         )
                         # Another plate of this design may already own the
                         # name (manifests can reuse titles) — never clobber it.
@@ -1216,29 +1326,18 @@ class DownloadManager:
         return env.get("hits") or []
 
 
-def _find_url(payload: Any) -> str | None:
-    """Recursively find the first http(s) URL in a JSON-like payload.
+def _manifest_url(manifest: Any) -> str | None:
+    """The model file's link in a download manifest, or None.
 
-    Bambu's download manifests aren't a stable shape across endpoints, so
-    download_url is extracted generically: known keys first ('url',
-    'downloadUrl', 'download_url'), then a depth-first value walk.
+    Top-level keys only, never a search through the body: when Bambu emptied
+    `url` (2026-11-03), the first link found deeper down was a print-settings
+    JSON, which got saved as the model.
     """
-    if isinstance(payload, str):
-        return payload if payload.startswith("http") else None
-    if isinstance(payload, dict):
+    if isinstance(manifest, dict):
         for key in ("url", "downloadUrl", "download_url"):
-            val = payload.get(key)
+            val = manifest.get(key)
             if isinstance(val, str) and val.startswith("http"):
                 return val
-        for value in payload.values():
-            found = _find_url(value)
-            if found:
-                return found
-    if isinstance(payload, list):
-        for item in payload:
-            found = _find_url(item)
-            if found:
-                return found
     return None
 
 
@@ -1290,6 +1389,19 @@ def _detect_extension(path: Path) -> str:
 
 
 _MODEL_EXTENSIONS = (".3mf", ".zip", ".stl", ".step", ".stp")
+
+
+def _is_json_file(path: Path) -> bool:
+    """Whether the file is a JSON object or array (and so not a model)."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(64).removeprefix(b"\xef\xbb\xbf").lstrip()
+        if not head.startswith((b"{", b"[")):
+            return False
+        json.loads(path.read_bytes().decode("utf-8-sig"))
+    except (OSError, ValueError):
+        return False
+    return True
 
 
 # Letters NFKD can't split into "base letter + accent" (they're letters of
