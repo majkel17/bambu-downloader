@@ -10,7 +10,7 @@ calm. Endpoint behaviour verified against live traffic on **2026-09-11**.
 
 | Host | Role | Cloudflare? |
 | --- | --- | --- |
-| `api.bambulab.com` (or `api.bambulab.cn` for region `china`) | Login, token validation/refresh, per-plate download URLs (`iot-service`) | No — fully open to plain HTTP clients |
+| `api.bambulab.com` (or `api.bambulab.cn` for region `china`) | Login, token validation/refresh, per-plate download URLs (`design-service`, `iot-service`) | No — fully open to plain HTTP clients |
 | `makerworld.com` `/api/*` JSON gateway | Design/instance metadata, collection listings | No — JSON endpoints are *not* challenged |
 | `makerworld.com` HTML pages | — | **Yes** (403 "Just a moment" for curl) — never used |
 | `makerworld.bblmw.com` | Cover images (Aliyun OSS); supports `x-oss-process=image/resize,w_N` | CDN; the signed query is the credential |
@@ -49,7 +49,13 @@ Designs (mw = makerworld.com)
   GET {mw}/api/v1/design-service/design/{designId}/model               (auth, legacy)
   GET {mw}/api/v1/design-service/instance/{instanceId}/f3mf            (auth, legacy)
 
-Download URL — primary
+Download URL — primary (since 2026-11-03)
+  GET {bambu_api}/v1/design-service/instance/{instanceId}/f3mf?type=download
+      (Bearer) → {"url": signed CDN URL, "name": "<file>.3mf"}
+      ⚠ instanceId is the instance's id field, NOT its profileId.
+      A 403 is about the model (→ ForbiddenError), not the sign-in.
+
+Download URL — fallback
   GET {bambu_api}/v1/iot-service/api/user/profile/{profileId}?model_id={alphanumericModelId}
       (Bearer) → {"url": signed CDN URL, "name": filename}
       ⚠ model_id is the design payload's ALPHANUMERIC modelId
@@ -91,9 +97,14 @@ Privacy semantics worth remembering:
   tokens are ignored for public resources (still 200) but a **valid token is
   required for private ones**. Always attach the stored token for
   user-triggered fetches; only `/api/status` token validation runs without.
-- The legacy `/design/{id}/model` and `/instance/{id}/f3mf` endpoints fail
-  with 400 for newer designs — the `iot-service` profile endpoint is the
-  primary path for everything.
+- Since 2026-11-03 the `iot-service` profile endpoint answers 200 "success"
+  with an **empty `url`**, while the body still links print-settings JSON.
+  Only the manifest's top-level `url` is ever followed (`_manifest_url`),
+  and a download that isn't a model file is thrown away. (Change and
+  replacement endpoint as reported by Bambuddy, maziggy/bambuddy#3447.)
+- The legacy makerworld.com `/design/{id}/model` and `/instance/{id}/f3mf`
+  endpoints fail for newer designs and are cookie-gated; they are only tried
+  when Bambu Cloud can't be asked (not signed in, or no instance).
 
 ---
 

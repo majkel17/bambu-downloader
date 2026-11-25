@@ -16,7 +16,7 @@ import httpx
 import pytest
 
 import app.makerworld as mw
-from app.downloader import _find_url
+from app.downloader import _manifest_url
 from app.makerworld import (
     MakerWorldClient,  # class object is stable enough for construction
     _detect_captcha,
@@ -82,14 +82,16 @@ def test_detect_captcha_textual():
     assert _detect_captcha(200, "captcha wall") is True
 
 
-def test_find_url_known_keys_and_recursion():
-    assert _find_url({"url": "https://a"}) == "https://a"
-    assert _find_url({"downloadUrl": "https://b"}) == "https://b"
+def test_manifest_url_reads_top_level_keys_only():
+    assert _manifest_url({"url": "https://a"}) == "https://a"
+    assert _manifest_url({"downloadUrl": "https://b"}) == "https://b"
+    # Bambu's profile manifest since 2026-11-03: no file link, only settings.
     assert (
-        _find_url({"a": {"b": [{"c": {"download_url": "https://d"}}]}}) == "https://d"
+        _manifest_url({"url": "", "context": {"configs": [{"url": "https://s"}]}})
+        is None
     )
-    assert _find_url({"url": "not-http"}) is None
-    assert _find_url(42) is None
+    assert _manifest_url({"url": "not-http"}) is None
+    assert _manifest_url(42) is None
 
 
 def test_filename_from_response_prefer_content_disposition():

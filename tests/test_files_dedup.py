@@ -119,7 +119,7 @@ class _DownloadFakeClient:
     async def get_design_instances(self, design_id):
         return {"hits": [{"id": 1, "profileId": 5}]}
 
-    async def get_profile_download(self, profile_id, model_id):
+    async def get_instance_manifest(self, instance_id):
         return {"url": "https://cdn.example/f", "name": "Plate 1"}
 
     async def download_file(self, url, dest_path):

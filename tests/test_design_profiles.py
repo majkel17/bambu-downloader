@@ -67,7 +67,8 @@ class _ProfilesClient:
         _ProfilesClient.instance_calls += 1
         return {"total": len(INSTANCES), "hits": INSTANCES}
 
-    async def get_profile_download(self, profile_id, model_id):
+    async def get_instance_manifest(self, instance_id):
+        profile_id = next(i["profileId"] for i in INSTANCES if i["id"] == instance_id)
         _ProfilesClient.downloads.append(profile_id)
         return {"url": "https://cdn.example/f", "name": f"ghost-{profile_id}"}
 

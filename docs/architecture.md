@@ -181,9 +181,9 @@ sequenceDiagram
     else new
         M->>C: get_client(token, region)
         M->>MW: GET design metadata + instances
-        M->>MW: GET /v1/iot-service/api/user/profile/{profileId}?model_id=…
+        M->>MW: GET /v1/design-service/instance/{instanceId}/f3mf?type=download
         MW-->>M: signed download URL + filename hint
-        Note over M: Fallbacks (old models only):<br/>instance /f3mf → design /model
+        Note over M: Fallback: iot-service profile manifest.<br/>Not signed in: legacy makerworld.com endpoints
         M->>FS: stream to .part → rename to final name
         M->>MW: fetch cover (CDN resize params)
         M->>FS: cover.webp next to model
